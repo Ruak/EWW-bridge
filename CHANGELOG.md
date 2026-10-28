@@ -2,6 +2,18 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.0
+
+First public release on the VS Code Marketplace.
+
+- Bidirectional bridge between the active Copilot Chat session and Feishu/Lark
+- Live card streaming with single-flight patching, auto-shrink under Feishu size limits
+- Feishu-native formatting (bold headings, bullet tables, code placeholders, readable local paths, emoji stripped)
+- Injection queue with single submission (no duplicate prompts), interruption recovery, reload-safe card persistence
+- Waiting heartbeats, model/elapsed footer, `forward.thinking` off by default
+
+Everything from 0.21.0 and below is included; see the entries below for the detailed history.
+
 ## 0.21.0
 
 - Fix duplicate prompts: injection is submitted **once** (45s confirmation window); auto-retry removed, fallback only when the command itself throws

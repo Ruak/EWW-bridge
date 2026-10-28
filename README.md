@@ -2,7 +2,8 @@
 
 Stream your active **VS Code Copilot Chat** session to **Feishu / Lark** as a live card — and send new tasks from Feishu back into the same chat session.
 
-[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Marketplace](https://img.shields.io/badge/marketplace-EWW%20Bridge-blue)](https://marketplace.visualstudio.com/items?itemName=huangdan.eww-bridge)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE))
 
 > Chinese quick start: [中文说明](#中文说明)
 
@@ -41,7 +42,7 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 
 ## Install
 
-- **Marketplace**: search for `EWW Bridge`
+- **Marketplace**: search for `EWW Bridge` or install `huangdan.eww-bridge`
 - **VSIX**: `code --install-extension eww-bridge-x.y.z.vsix`
 - **Source**: `npm install && npm run compile && npm run package`
 
