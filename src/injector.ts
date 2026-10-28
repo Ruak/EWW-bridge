@@ -248,10 +248,12 @@ export class Injector {
       }
       if (this.watcher.isBusy()) {
         sawBusy = true;
-      } else if (sawBusy) {
-        return 'ended';
       }
       const quietFor = Date.now() - (this.transcript?.lastActivity ?? startedAt);
+      // chatSessions 在工具循环/后台终端通知时会短暂显示空闲，必须再等实时源静默
+      if (sawBusy && !this.watcher.isBusy() && quietFor > 15000) {
+        return 'ended';
+      }
       if (Date.now() - startedAt > 120000 && quietFor > 120000) {
         return 'ended';
       }

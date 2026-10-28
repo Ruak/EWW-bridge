@@ -2,6 +2,12 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.2
+
+- Background terminal notifications (`[Terminal …]` steering messages) are no longer treated as turn interruptions: transcript keeps accumulating, the streaming card state is preserved, and no spurious "已中断" card/queue release happens
+- `chatSessions` requests created by terminal notifications are skipped entirely (no user/assistant/partial events)
+- Turn-end detection requires 15s of real transcript silence, so brief `isBusy` flickers during tool loops no longer abort the waiting task
+
 ## 1.0.1
 
 - **Logging no longer dies after re-activation**: file logging is written before the output channel and output-channel errors are swallowed (a disposed channel could silently kill all logging)

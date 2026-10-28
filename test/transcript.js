@@ -108,7 +108,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     throw new Error(`reset 后未重新累计: ${JSON.stringify(third)}`);
   }
 
-  // 4) 回合进行中收到新消息 → 判定为被打断
+  // 4) 回合进行中收到后台终端通知 → 属于同一回合的 steering 消息，不算打断
   append({ type: 'assistant.turn_start', data: {} });
   await delay(100);
   append({
@@ -116,8 +116,15 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     data: { content: '[Terminal abc notification: command completed with exit code 0. The terminal has been cleaned up.]' },
   });
   await delay(250);
-  if (interrupts.length !== 1 || !interrupts[0].startsWith('[Terminal ')) {
-    throw new Error(`打断检测失败: ${JSON.stringify(interrupts)}`);
+  if (interrupts.length !== 0) {
+    throw new Error(`终端通知不应打断回合: ${JSON.stringify(interrupts)}`);
+  }
+
+  // 4.5) 真正的用户新消息仍然算打断
+  append({ type: 'user.message', data: { content: '手动插入的新问题' } });
+  await delay(250);
+  if (interrupts.length !== 1 || interrupts[0] !== '手动插入的新问题') {
+    throw new Error(`用户新消息未判定为打断: ${JSON.stringify(interrupts)}`);
   }
 
   // 5) 新回合不得携带上一轮内容

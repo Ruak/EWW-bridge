@@ -311,6 +311,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       stopHeartbeat(sessionId);
       const system = content.startsWith('[Terminal ');
       log(`transcript: turn interrupted by ${system ? 'terminal notification' : 'new user message'} (${content.length}ch)`);
+      if (system) {
+        // transcript 已过滤，此处仅兜底：后台终端通知不是中断，保留卡片状态继续同步
+        return;
+      }
       if (!state?.messageId || Date.now() - state.lastPatchAt < 15000) {
         return;
       }
@@ -848,7 +852,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void reply('未能确认投递：VS Code 可能在后端/面板未就绪，消息可能已经进去但处理较慢。若一直无回复，请把 VS Code 窗口切到前台后重发。');
       },
       onAborted: () => {
-        void reply('上一轮在 VS Code 侧被中断（常见原因：后台终端通知或上下文超限），已继续处理队列。');
+        void reply('上一轮已结束但没有最终文本，已继续处理队列。');
       },
       onTimeout: () => {
         void reply('任务超时未结束，请回 VS Code 查看，或发送 /stop 终止。');

@@ -203,6 +203,11 @@ export class TranscriptWatcher {
     }
     if (type === 'user.message') {
       const content = typeof data.content === 'string' ? data.content.trim() : '';
+      // 后台终端通知（[Terminal ...]）是 VS Code 注入的 steering 消息：同一回合继续，不能当新提问处理
+      if (content.startsWith('[Terminal ')) {
+        this.lastEventAt = Date.now();
+        return;
+      }
       if (this.active) {
         this.onInterrupt?.(content);
       }

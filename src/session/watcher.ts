@@ -302,7 +302,7 @@ export class SessionWatcher {
     for (let i = this.seenRequests; i < requests.length; i++) {
       const request = requests[i];
       const text = requestText(request);
-      if (!request.hiddenFromTranscript && text) {
+      if (!request.hiddenFromTranscript && text && !text.startsWith('[Terminal ')) {
         this.onUser?.({
           sessionId: this.sessionId,
           index: i,
@@ -319,6 +319,10 @@ export class SessionWatcher {
     // 2) 助手回答（回合结束后落定；结束前的增量在 maybeEmitPartial 中推送）
     for (let i = 0; i < requests.length; i++) {
       const request = requests[i];
+      if (requestText(request).startsWith('[Terminal ')) {
+        this.completed.add(i);
+        continue;
+      }
       const complete = isRequestComplete(request);
       const newlyComplete = complete && !this.completed.has(i);
       if (newlyComplete) {
@@ -358,7 +362,7 @@ export class SessionWatcher {
       return;
     }
     const request = requests[index];
-    if (!request || isRequestComplete(request)) {
+    if (!request || isRequestComplete(request) || requestText(request).startsWith('[Terminal ')) {
       return;
     }
     const text = extractText(request.response);
@@ -399,6 +403,9 @@ export class SessionWatcher {
     }
     const index = this.state.requests.length - 1;
     const request = this.state.requests[index];
+    if (!request || requestText(request).startsWith('[Terminal ')) {
+      return;
+    }
     if (!request) {
       return;
     }
