@@ -40,6 +40,59 @@ export interface PatchLine {
  *   kind 1 = 对指定路径赋值
  *   kind 2 = 向指定数组追加元素（v 为数组）
  */
+/**
+ * 尾部解析用的宽松版：路径缺失时自动建对象/数组。
+ * 只能拿到最近若干请求（旧请求会被留成空洞），但内存和耗时都是常数级。
+ */
+export function applyPatchLenient(state: any, patch: PatchLine): any {
+  if (patch.kind === 0) {
+    return patch.v;
+  }
+  const path = patch.k;
+  if (!Array.isArray(path) || path.length === 0) {
+    return state;
+  }
+  const root = state && typeof state === 'object' ? state : {};
+  let cursor: any = root;
+  for (let i = 0; i < path.length - 1; i++) {
+    const key = path[i] as any;
+    const next = path[i + 1];
+    if (cursor[key] === undefined || cursor[key] === null || typeof cursor[key] !== 'object') {
+      cursor[key] = typeof next === 'number' ? [] : {};
+    }
+    cursor = cursor[key];
+  }
+  const last = path[path.length - 1] as any;
+  if (patch.kind === 1) {
+    cursor[last] = patch.v;
+    return root;
+  }
+  if (patch.kind === 2) {
+    const rawIndex = (patch as any).i;
+    const hasValue = (patch as any).v !== undefined;
+    const incoming = hasValue ? (Array.isArray((patch as any).v) ? (patch as any).v : [(patch as any).v]) : undefined;
+    let target = cursor[last];
+    if (!Array.isArray(target)) {
+      target = [];
+      cursor[last] = target;
+    }
+    if (!incoming) {
+      if (typeof rawIndex === 'number') {
+        target.splice(rawIndex, 1);
+      }
+      return root;
+    }
+    if (typeof rawIndex === 'number' && rawIndex <= target.length) {
+      target.splice(rawIndex, 0, ...incoming);
+    } else {
+      target.push(...incoming);
+    }
+    return root;
+  }
+  cursor[last] = patch.v;
+  return root;
+}
+
 export function applyPatch(state: SessionState | undefined, patch: PatchLine): SessionState {
   if (patch.kind === 0) {
     return patch.v as SessionState;

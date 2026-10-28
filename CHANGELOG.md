@@ -2,6 +2,15 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.5
+
+- **Bounded memory for huge session files**. Measured on a 313 MB `chatSessions` file: full parse took 38.5s and peaked at **2.6 GB** heap (~326 MB settled). Now:
+  - Files larger than 8 MB are parsed from a **tail window** with a lenient patch applier (missing paths are created)
+  - Parsing is chunked (1 MB reads) and in-flight responses are **compacted**: non-text parts are reduced to `kind` only, old answers are blanked, tool parts keep only their label
+  - `emitted` bookkeeping stores a short content signature instead of the full text
+  - Result: **~1.1s / 48 MB heap / 90 MB RSS** for the same file
+- Patch failures no longer trigger a full-file rebuild (which caused the multi-GB spike); they are skipped and logged at most once per minute
+
 ## 1.0.4
 
 - **Removed the sticky `suppressStreamingUntilTurnEnd` flag** that could swallow an entire turn after a mid-turn reload (observed: 3m22s of silence until an unrelated terminal notification cleared it). Streaming now starts from the current progress

@@ -1,8 +1,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { StringDecoder } from 'string_decoder';
 import { log, logError } from '../log';
 import {
   applyPatch,
+  applyPatchLenient,
   extractText,
   extractThinking,
   extractTools,
@@ -71,6 +73,10 @@ export class SessionWatcher {
   private lastPartialSig = new Map<number, string>();
   /** 激活/重载时是否已经有一个未完成的回合（避免把中途 tail 当成完整流式） */
   private baselineIncomplete = false;
+  private lastCompact = 0;
+  private lastPatchErrorLog = 0;
+  /** 尾部解析模式：允许补丁路径自动创建 */
+  private lenient = false;
 
   /** 流式预览的最小间隔（毫秒），由扩展按设置更新 */
   partialIntervalMs = 800;
@@ -123,6 +129,9 @@ export class SessionWatcher {
     const requests = this.state?.requests ?? [];
     for (let i = requests.length - 1; i >= 0; i--) {
       const request = requests[i];
+      if (!request) {
+        continue;
+      }
       if (requestText(request).startsWith('[Terminal ')) {
         continue;
       }
@@ -165,6 +174,9 @@ export class SessionWatcher {
       `completed: ${this.completedCount}`,
     ];
     requests.forEach((request, index) => {
+      if (!request) {
+        return;
+      }
       lines.push(
         `#${index} complete=${isRequestComplete(request)} user=${requestText(request).length}ch ` +
           `answer=${extractText(request.response).length}ch tools=${extractTools(request.response).length}`,
@@ -191,6 +203,9 @@ export class SessionWatcher {
         this.lastChange = Date.now();
       }
       this.idleFallback();
+      if (Date.now() - this.lastCompact > 15000) {
+        this.compactState();
+      }
       this.maybeEmitPartial();
     } catch (error) {
       logError('watcher poll failed', error);
@@ -232,22 +247,31 @@ export class SessionWatcher {
     this.completed.clear();
     this.seenRequests = 0;
 
-    const content = fs.readFileSync(file, 'utf8');
-    this.offset = Buffer.byteLength(content, 'utf8');
-    this.ingest(content);
+    const stat = fs.statSync(file);
+    // 大文件只解尾部：全量解析 300MB+ 会阻塞几十秒、峰值内存数 GB
+    const TAIL_BYTES = 8 * 1024 * 1024;
+    const tail = stat.size > TAIL_BYTES;
+    this.lenient = tail;
+    if (tail) {
+      this.state = {} as SessionState;
+    }
+    this.readRange(file, tail ? stat.size - TAIL_BYTES : 0, stat.size);
+    this.lenient = false;
+    this.offset = stat.size;
+    this.compactState();
     const state = this.state as SessionState | undefined;
-    const requests = state?.requests.length ?? 0;
-    this.seenRequests = requests;
-    for (let i = 0; i < requests; i++) {
-      const request = state?.requests[i];
+    const requests: any[] = (state?.requests as any[]) ?? [];
+    this.seenRequests = requests.length;
+    for (let i = 0; i < requests.length; i++) {
+      const request = requests[i];
       if (request && isRequestComplete(request)) {
         this.completed.add(i);
         // 建立基线时已完成的回合不应重放（否则重载窗口会把历史全部发一遍）
-        this.emitted.set(i, extractText(request.response));
+        this.emitted.set(i, this.sig(extractText(request.response)));
       }
     }
     this.completedCount = this.completed.size;
-    this.baselineIncomplete = requests > 0 && !!state && !isRequestComplete(state.requests[requests - 1]);
+    this.baselineIncomplete = requests.length > 0 && !!requests[requests.length - 1] && !isRequestComplete(requests[requests.length - 1]);
     this.lastChange = Date.now();
     log(`watcher: attached ${this.sessionId}, baseline requests=${requests}, completed=${this.completedCount}, midTurn=${this.baselineIncomplete}`);
   }
@@ -265,17 +289,37 @@ export class SessionWatcher {
     if (size <= this.offset) {
       return false;
     }
-    const fd = fs.openSync(this.file, 'r');
+    // 每次最多读 4MB，避免落盘批次过大时瞬时内存峰值
+    const end = Math.min(size, this.offset + 4 * 1024 * 1024);
+    this.readRange(this.file, this.offset, end);
+    this.offset = end;
+    this.afterIngest();
+    return true;
+  }
+
+  /** 分块读取并逐行应用补丁，避免把整个 300MB+ 文件读成字符串 */
+  private readRange(file: string, start: number, end: number): void {
+    const fd = fs.openSync(file, 'r');
+    const decoder = new StringDecoder('utf8');
+    const chunk = Buffer.alloc(1024 * 1024);
     try {
-      const buffer = Buffer.alloc(size - this.offset);
-      fs.readSync(fd, buffer, 0, buffer.length, this.offset);
-      this.offset = size;
-      this.ingest(buffer.toString('utf8'));
+      let pos = start;
+      while (pos < end) {
+        const want = Math.min(chunk.length, end - pos);
+        const read = fs.readSync(fd, chunk, 0, want, pos);
+        if (read <= 0) {
+          break;
+        }
+        pos += read;
+        this.ingest(decoder.write(chunk.subarray(0, read)));
+      }
+      const tail = decoder.end();
+      if (tail) {
+        this.ingest(tail);
+      }
     } finally {
       fs.closeSync(fd);
     }
-    this.afterIngest();
-    return true;
   }
 
   private ingest(text: string): void {
@@ -294,10 +338,15 @@ export class SessionWatcher {
         continue;
       }
       try {
-        this.state = applyPatch(this.state, patch as any);
-      } catch (error) {
-        logError('patch apply failed, rebuilding from file', error);
-        this.rebuild();
+        this.state = this.lenient
+          ? (applyPatchLenient(this.state, patch as any) as SessionState)
+          : applyPatch(this.state, patch as any);
+      } catch {
+        // 不重建：重建会读整文件，内存峰值高且会卡住；跳过这一条补丁即可
+        if (Date.now() - this.lastPatchErrorLog > 60000) {
+          this.lastPatchErrorLog = Date.now();
+          log('watcher: 跳过一条无法应用的补丁');
+        }
       }
     }
   }
@@ -306,10 +355,82 @@ export class SessionWatcher {
     if (!this.file) {
       return;
     }
-    const content = fs.readFileSync(this.file, 'utf8');
+    const stat = fs.statSync(this.file);
     this.state = undefined;
     this.leftover = '';
-    this.ingest(content);
+    this.readRange(this.file, 0, stat.size);
+  }
+
+  /** 只保留同步所需字段（文本/思考/工具名），其余部分置空但保留数组下标 */
+  private compactState(): void {
+    const state = this.state as SessionState | undefined;
+    const requests: any[] = (state?.requests as any[]) ?? [];
+    const keepTextFrom = Math.max(0, requests.length - 3);
+    for (let i = 0; i < requests.length; i++) {
+      const request = requests[i];
+      if (!request || typeof request !== 'object') {
+        continue;
+      }
+      for (const key of [
+        'modelState',
+        'outputBuffer',
+        'promptTokenDetails',
+        'contentReferences',
+        'codeCitations',
+        'variableData',
+        'followups',
+        'responseMarkdownInfo',
+        'modeInfo',
+        'modelConfiguration',
+        'agent',
+      ]) {
+        delete request[key];
+      }
+      const parts: any[] = Array.isArray(request.response) ? request.response : [];
+      const keepText = i >= keepTextFrom;
+      for (const part of parts) {
+        if (!part || typeof part !== 'object') {
+          continue;
+        }
+        if (part.kind === undefined) {
+          if (typeof part.value === 'string' && (!keepText || part.value.length > 20000)) {
+            part.value = keepText ? part.value.slice(-20000) : '';
+          }
+          continue;
+        }
+        if (part.kind === 'thinking') {
+          if (typeof part.value === 'string' && !keepText) {
+            part.value = '';
+          }
+          continue;
+        }
+        if (part.kind === 'toolInvocationSerialized') {
+          const message = part.invocationMessage;
+          for (const key of Object.keys(part)) {
+            if (key !== 'kind' && key !== 'invocationMessage') {
+              delete part[key];
+            }
+          }
+          part.invocationMessage = message ?? '';
+          continue;
+        }
+        for (const key of Object.keys(part)) {
+          if (key !== 'kind') {
+            delete part[key];
+          }
+        }
+      }
+    }
+    this.lastCompact = Date.now();
+  }
+
+  private sig(text: string): string {
+    let hash = 0;
+    const step = Math.max(1, Math.floor(text.length / 2048));
+    for (let i = 0; i < text.length; i += step) {
+      hash = (hash * 31 + text.charCodeAt(i)) | 0;
+    }
+    return `${text.length}:${hash}`;
   }
 
   private afterIngest(): void {
@@ -317,6 +438,9 @@ export class SessionWatcher {
     // 1) 新提问
     for (let i = this.seenRequests; i < requests.length; i++) {
       const request = requests[i];
+      if (!request) {
+        continue;
+      }
       const text = requestText(request);
       if (!request.hiddenFromTranscript && text && !text.startsWith('[Terminal ')) {
         this.onUser?.({
@@ -335,6 +459,9 @@ export class SessionWatcher {
     // 2) 助手回答（回合结束后落定；结束前的增量在 maybeEmitPartial 中推送）
     for (let i = 0; i < requests.length; i++) {
       const request = requests[i];
+      if (!request) {
+        continue;
+      }
       if (requestText(request).startsWith('[Terminal ')) {
         this.completed.add(i);
         continue;
@@ -347,8 +474,8 @@ export class SessionWatcher {
       }
       const text = extractText(request.response);
       const lastEmitted = this.emitted.get(i);
-      if (complete && (newlyComplete || lastEmitted !== text)) {
-        this.emitted.set(i, text);
+      if (complete && (newlyComplete || lastEmitted !== this.sig(text))) {
+        this.emitted.set(i, this.sig(text));
         if (text) {
           this.assistantCount += 1;
         }
@@ -380,8 +507,7 @@ export class SessionWatcher {
     const request = requests[index];
     if (!request || isRequestComplete(request) || requestText(request).startsWith('[Terminal ')) {
       return;
-    }
-    const text = extractText(request.response);
+    }    const text = extractText(request.response);
     const thinking = extractThinking(request.response);
     const tools = extractTools(request.response);
     if (!text && !thinking && tools.length === 0) {
@@ -427,10 +553,10 @@ export class SessionWatcher {
     }
     const rawText = extractText(request.response);
     const text = rawText;
-    if (this.emitted.get(index) === text) {
+    if (this.emitted.get(index) === this.sig(text)) {
       return;
     }
-    this.emitted.set(index, text);
+    this.emitted.set(index, this.sig(text));
     if (text) {
       this.assistantCount += 1;
     }
