@@ -77,6 +77,8 @@ export class SessionWatcher {
   private lastPatchErrorLog = 0;
   /** 尾部解析模式：允许补丁路径自动创建 */
   private lenient = false;
+  /** 是否只解析了文件尾部（大文件）：此时 requests 有空洞、下标不可信 */
+  private partialTail = false;
   /** 激活时的最后一条请求下标；比它更早的历史回合迟到补丁不得重放 */
   private replayFloor = 0;
 
@@ -113,6 +115,15 @@ export class SessionWatcher {
     return this.baselineIncomplete;
   }
 
+  /**
+   * chatSessions 是否是“只解析了尾部”的残缺状态（文件过大时）。
+   * 这种状态下 requests 数组是稀疏的、下标与真实回合号对不上，任何基于下标的出站/重放都不可信，
+   * 需要改用 transcript 作为唯一可靠源。
+   */
+  get partialState(): boolean {
+    return this.partialTail;
+  }
+
   /** 跨会话累计的助手消息数，用于注入后判断“是否真的产生了回答” */
   get assistantMessages(): number {
     return this.assistantCount;
@@ -123,7 +134,14 @@ export class SessionWatcher {
     if (!requests || requests.length === 0) {
       return false;
     }
-    return !isRequestComplete(requests[requests.length - 1]);
+    // 尾部解析会有空洞：必须跳到最后一个真实存在的请求，否则会把“空洞”当成未完成而永远忙
+    for (let i = requests.length - 1; i >= 0; i--) {
+      const request = requests[i];
+      if (request) {
+        return !isRequestComplete(request);
+      }
+    }
+    return false;
   }
 
   /** 最近一个非系统请求的状态：只有 result 才算完成，elapsedMs=0 且无 result 才算中断 */
@@ -226,8 +244,25 @@ export class SessionWatcher {
       }
       const active = this.findActiveFile();
       if (active && active !== this.file) {
-        this.attach(active);
-        return;
+        // 只有当前会话已经彻底停了（2 分钟内无写入）才切换到新文件，
+        // 否则其它聊天标签页/后台会话一被触碰就会把镜像“抢走”，表现得像乱入消息
+        let currentFresh = false;
+        try {
+          currentFresh = !!this.file && Date.now() - fs.statSync(this.file).mtimeMs < 120000;
+        } catch {
+          currentFresh = false;
+        }
+        let activeFresh = false;
+        try {
+          activeFresh = Date.now() - fs.statSync(active).mtimeMs < 120000;
+        } catch {
+          activeFresh = false;
+        }
+        if (!currentFresh && activeFresh) {
+          log(`watcher: 切换会话 ${path.basename(this.file, '.jsonl').slice(0, 8)} -> ${path.basename(active, '.jsonl').slice(0, 8)}`);
+          this.attach(active);
+          return;
+        }
       }
       if (this.readAppended()) {
         this.lastChange = Date.now();
@@ -282,11 +317,13 @@ export class SessionWatcher {
     const TAIL_BYTES = 8 * 1024 * 1024;
     const tail = stat.size > TAIL_BYTES;
     this.lenient = tail;
+    this.partialTail = tail;
     if (tail) {
       this.state = {} as SessionState;
     }
     this.readRange(file, tail ? stat.size - TAIL_BYTES : 0, stat.size);
-    this.lenient = false;
+    // 残缺尾部下后续补丁也可能引用“我们没解析到的旧路径”，必须继续宽松应用，否则新回合直接丢失
+    this.lenient = tail;
     this.offset = stat.size;
     this.compactState();
     const state = this.state as SessionState | undefined;
@@ -304,7 +341,9 @@ export class SessionWatcher {
       }
     }
     this.completedCount = this.completed.size;
-    this.baselineIncomplete = requests.length > 0 && !!requests[requests.length - 1] && !isRequestComplete(requests[requests.length - 1]);
+    const lastIndex = this.lastRequestIndex();
+    const lastRequest = lastIndex >= 0 ? requests[lastIndex] : undefined;
+    this.baselineIncomplete = !!lastRequest && !isRequestComplete(lastRequest);
     this.lastChange = Date.now();
     log(`watcher: attached ${this.sessionId}, baseline requests=${requests.length}, completed=${this.completedCount}, midTurn=${this.baselineIncomplete}`);
   }
@@ -457,6 +496,17 @@ export class SessionWatcher {
     this.lastCompact = Date.now();
   }
 
+  /** 最后一个真实存在的请求下标（尾部解析会有空洞，不能用 requests.length - 1） */
+  private lastRequestIndex(): number {
+    const requests = this.state?.requests ?? [];
+    for (let i = requests.length - 1; i >= 0; i--) {
+      if (requests[i]) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   private sig(text: string): string {
     let hash = 0;
     const step = Math.max(1, Math.floor(text.length / 2048));
@@ -536,7 +586,7 @@ export class SessionWatcher {
   /** 回合结束前推送思考 / 已生成内容（节流） */
   private maybeEmitPartial(): void {
     const requests = this.state?.requests ?? [];
-    const index = requests.length - 1;
+    const index = this.lastRequestIndex();
     if (index < 0) {
       return;
     }
@@ -579,7 +629,10 @@ export class SessionWatcher {
     if (idleFor < this.idleFallbackMs) {
       return;
     }
-    const index = this.state.requests.length - 1;
+    const index = this.lastRequestIndex();
+    if (index < 0) {
+      return;
+    }
     const request = this.state.requests[index];
     if (!request || requestText(request).startsWith('[Terminal ')) {
       return;

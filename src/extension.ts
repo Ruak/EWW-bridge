@@ -280,6 +280,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // 正文多源合并：只允许同一回合的 chatSessions 正文参与，避免新回合把上一轮的答复带出来
   const mergedAnswer = (fallback: string, index?: number): string => {
+    // 尾部解析出的 requests 是稀疏的，下标与真实回合号对不上，参与合并只会把旧回合正文带进来
+    if (watcher?.partialState) {
+      return fallback;
+    }
     const sessionText = watcher?.latestAnswerText(index) ?? '';
     return sessionText.length > (fallback || '').length ? sessionText : fallback;
   };
@@ -532,6 +536,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         showThinking: config.forwardThinking,
         thinkingLimit: 6000,
         answerLimit: 12000,
+        footer: transcript?.elapsedMs ? `${Math.round((transcript.elapsedMs ?? 0) / 1000)}s` : '',
       });
       if (state?.lastRendered === cards.v2) {
         return;
@@ -583,6 +588,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         knownStart > 0 && now - knownStart < 600000 ? Math.min(knownStart, now) : now,
       );
       const config = readConfig();
+      const promptChatId = targetChatId();
+      // transcript 驱动模式下（chatSessions 残缺），占位卡必须在这里创建，否则新一轮没有卡片
+      if (
+        config.forwardAssistant &&
+        config.forwardStreaming &&
+        promptChatId &&
+        feishu?.started &&
+        !activeStreams.get(event.sessionId)?.messageId
+      ) {
+        void pushStreamCard(
+          event.sessionId,
+          promptChatId,
+          buildStreamingCards({
+            title: 'Copilot · 处理中…',
+            status: '已收到，正在处理…',
+            expanded: false,
+            showThinking: config.forwardThinking,
+          }),
+        ).then((created) => {
+          if (!created.turnStartedAt) {
+            created.turnStartedAt = now;
+          }
+          if (created.messageId) {
+            saveStreamState(event.sessionId, created.messageId, created.requestIndex, created.lastAnswerText);
+          }
+        });
+      }
       if (!config.forwardUser) {
         return;
       }
@@ -701,6 +733,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   if (watcher) {
     watcher.onUser = (event) => {
+      if (watcher!.partialState) {
+        return;
+      }
       const config = readConfig();
       if (event.text.startsWith('[Terminal ')) {
         log('outbound: skip terminal notification user message');
@@ -788,6 +823,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 兜底：transcript 不可用（或尚未产生增量）时，用 chatSessions 的增量
     watcher.onPartial = (event) => {
+      if (watcher!.partialState) {
+        return;
+      }
       const config = readConfig();
       if (!config.forwardAssistant || !config.forwardStreaming) {
         return;
@@ -837,6 +875,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
 
     watcher.onAssistant = (event) => {
+      if (watcher!.partialState) {
+        // 残缺尾部：终稿会由 transcript 的软结束推送，这里的下标/正文都不可信
+        return;
+      }
       const config = readConfig();
       if (!config.forwardAssistant) {
         return;
@@ -1021,7 +1063,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // 出站处理器已就绪：补全重载前未定稿的卡片
   if (pendingReplayIndex !== undefined) {
-    watcher?.replayLast(pendingReplayIndex);
+    if (watcher?.partialState) {
+      // 残缺尾部里的“最后一条”很可能是几小时前的旧请求，重放会往卡片里塞无关内容
+      log('outbound: chatSessions 为残缺尾部，跳过历史重放');
+    } else {
+      watcher?.replayLast(pendingReplayIndex);
+    }
     pendingReplayIndex = undefined;
   }
 

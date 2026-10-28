@@ -52,6 +52,11 @@ export class TranscriptWatcher {
   private settledAt = 0;
   /** 已看到 turn_start/user.message，但还没等到 turn_end */
   private turnOpen = false;
+  /** 本任务（一次提问）的开始时间与耗时（turn_end 时结算） */
+  private turnStartedAt = 0;
+  private lastElapsedMs = 0;
+  /** 静默摄入（重载回看）：只重建状态，不触发任何回调 */
+  private silent = false;
   private toolInFlightCount = 0;
   private toolStarts = new Map<string, ToolActivity>();
   private lastLoggedTextLen = 0;
@@ -129,6 +134,14 @@ export class TranscriptWatcher {
     return this.lastEventAt ? Date.now() - this.lastEventAt : Number.MAX_SAFE_INTEGER;
   }
 
+  /** 本任务耗时（毫秒，turn_end 时结算） */
+  get elapsedMs(): number {
+    if (this.lastElapsedMs) {
+      return this.lastElapsedMs;
+    }
+    return this.turnStartedAt ? Date.now() - this.turnStartedAt : 0;
+  }
+
   /** 回合结束后清空累计，下一轮重新开始 */
   reset(): void {
     this.thinking = '';
@@ -143,6 +156,8 @@ export class TranscriptWatcher {
     this.toolInFlightCount = 0;
     this.toolStarts.clear();
     this.turnOpen = false;
+    this.turnStartedAt = 0;
+    this.lastElapsedMs = 0;
   }
 
   private poll(): void {
@@ -193,13 +208,59 @@ export class TranscriptWatcher {
     this.sessionId = path.basename(file, '.jsonl');
     this.leftover = '';
     this.reset();
+    let size = 0;
     try {
-      // 从文件末尾开始，避免把历史回合当成实时增量
-      this.offset = fs.statSync(file).size;
+      size = fs.statSync(file).size;
     } catch {
-      this.offset = 0;
+      size = 0;
     }
-    log(`transcript: attached ${this.sessionId} (from end)`);
+    // 从最后一个真实提问开始回看（重载时保证本轮已有正文不丢），最多回看 4MB
+    let start = size;
+    const REWIND = 4 * 1024 * 1024;
+    if (size > 0 && size <= REWIND) {
+      start = 0;
+    } else if (size > REWIND) {
+      try {
+        const fd = fs.openSync(file, 'r');
+        const buf = Buffer.alloc(REWIND);
+        fs.readSync(fd, buf, 0, REWIND, size - REWIND);
+        fs.closeSync(fd);
+        const lines = buf.toString('utf8').split('\n');
+        let offset = size - REWIND;
+        let found = -1;
+        for (const line of lines) {
+          if (line.includes('"user.message"')) {
+            try {
+              const ev = JSON.parse(line);
+              if (
+                ev?.type === 'user.message' &&
+                typeof ev.data?.content === 'string' &&
+                !ev.data.content.startsWith('[Terminal ')
+              ) {
+                found = offset;
+              }
+            } catch {
+              /* 半截行，忽略 */
+            }
+          }
+          offset += Buffer.byteLength(line, 'utf8') + 1;
+        }
+        if (found >= 0) {
+          start = found;
+        }
+      } catch {
+        /* 回看失败就用文件末尾 */
+      }
+    }
+    this.offset = start;
+    this.silent = true;
+    try {
+      this.readAppended();
+    } catch {
+      /* 静默摄入失败不影响后续增量 */
+    }
+    this.silent = false;
+    log(`transcript: attached ${this.sessionId} (${start === size ? 'from end' : `rewind ${size - start}B`})`);
     this.onSessionChange?.(this.sessionId);
   }
 
@@ -262,11 +323,15 @@ export class TranscriptWatcher {
         return;
       }
       if (this.active) {
-        this.onInterrupt?.(content);
+        if (!this.silent) {
+          this.onInterrupt?.(content);
+        }
       }
       if (content) {
         this.userPrompts += 1;
-        this.onUserPrompt?.({ sessionId: this.sessionId, text: content });
+        if (!this.silent) {
+          this.onUserPrompt?.({ sessionId: this.sessionId, text: content });
+        }
       }
       // 新回合开始：清空上一轮累计，避免新卡片带上旧内容
       this.thinking = '';
@@ -282,6 +347,8 @@ export class TranscriptWatcher {
       this.toolStarts.clear();
       this.lastLoggedTextLen = 0;
       this.turnOpen = true;
+      this.turnStartedAt = Date.now();
+      this.lastElapsedMs = 0;
       this.lastEventAt = Date.now();
       return;
     }
@@ -321,7 +388,9 @@ export class TranscriptWatcher {
       };
       this.toolStarts.set(callId, activity);
       this.toolInFlightCount += 1;
-      this.onTool?.(activity);
+      if (!this.silent) {
+        this.onTool?.(activity);
+      }
       this.turnEndedAt = 0;
       this.softFinalSent = false;
       this.settledAt = 0;
@@ -339,7 +408,9 @@ export class TranscriptWatcher {
         }
       }
       this.toolInFlightCount = Math.max(0, this.toolInFlightCount - 1);
-      this.onTool?.(this.activeTools().slice(-1)[0]);
+      if (!this.silent) {
+        this.onTool?.(this.activeTools().slice(-1)[0]);
+      }
       this.turnEndedAt = 0;
       this.softFinalSent = false;
       this.settledAt = 0;
@@ -347,6 +418,9 @@ export class TranscriptWatcher {
       // 每条模型消息结束都会触发；若后续没有工具/新消息，则视为回合结束
       this.turnEndedAt = Date.now();
       this.turnOpen = false;
+      if (this.turnStartedAt) {
+        this.lastElapsedMs = Date.now() - this.turnStartedAt;
+      }
     } else {
       return;
     }
@@ -364,7 +438,7 @@ export class TranscriptWatcher {
     this.settledAt = Date.now();
     this.softFinalSent = true;
     this.active = false;
-    if (!this.thinking && !this.text && this.tools.length === 0) {
+    if (this.silent || !this.thinking && !this.text && this.tools.length === 0) {
       return;
     }
     this.onSoftFinal?.({
@@ -420,6 +494,9 @@ export class TranscriptWatcher {
     this.lastEmitAt = now;
     this.dirty = false;
     this.emitCount += 1;
+    if (this.silent) {
+      return;
+    }
     if (Math.abs(this.text.length - this.lastLoggedTextLen) >= 80) {
       this.lastLoggedTextLen = this.text.length;
       log(`transcript: 正文累计 ${this.text.length}ch（增量#${this.emitCount}）`);

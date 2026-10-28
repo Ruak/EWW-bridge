@@ -220,7 +220,7 @@ export class Injector {
     const deadline = Date.now() + maxMs;
     while (Date.now() < deadline) {
       const status = this.watcher?.getStatus();
-      if (status && (status.sessionId !== sessionIdBefore || status.requests > requestsBefore)) {
+      if (status && !this.watcher?.partialState && (status.sessionId !== sessionIdBefore || status.requests > requestsBefore)) {
         return true;
       }
       if (this.transcript) {
@@ -262,11 +262,11 @@ export class Injector {
     const deadline = startedAt + timeoutMs;
     let sawActivity = false;
     while (Date.now() < deadline) {
-      if (this.watcher && this.watcher.assistantMessages > assistantCountBefore) {
+      if (this.watcher && !this.watcher.partialState && this.watcher.assistantMessages > assistantCountBefore) {
         return 'completed';
       }
       const status = this.watcher?.getStatus();
-      if (this.watcher && status && status.requests > requestsBefore) {
+      if (this.watcher && !this.watcher.partialState && status && status.requests > requestsBefore) {
         const latest = this.watcher.latestStatus();
         if (latest === 'aborted') {
           return 'ended';
