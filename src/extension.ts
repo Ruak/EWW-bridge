@@ -36,19 +36,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const label = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || vscode.workspace.name || 'window';
   const storageRoot =
     context.globalStorageUri?.fsPath || context.storageUri?.fsPath || (process.env.TEMP || '.') + '\\eww-bridge';
-  const ownership = acquireOwnership(storageRoot, label);
+  // 锁按项目分桶：不同项目窗口各自推送自己的聊天，只有同一个文件夹的多个窗口才需要仲裁
+  const ownership = acquireOwnership(storageRoot, label, label);
   setInstanceTag(ownership.owner ? `w:${ownership.instanceId}` : `p:${ownership.instanceId}`);
   context.subscriptions.push({ dispose: () => ownership.dispose() });
   if (!ownership.owner) {
     const passive = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
-    passive.text = '$(circle-slash) 飞书(已接管)';
-    passive.tooltip = `EWW Bridge：本窗口未启用，由 ${ownership.ownerLabel ?? '其它窗口'} 负责推送`;
+    passive.text = '$(circle-slash) 飞书(同项目已接管)';
+    passive.tooltip = `EWW Bridge：本窗口未启用。同一个项目（${ownership.scope}）已由 ${ownership.ownerLabel ?? '其它窗口'} 负责推送`;
     passive.show();
     context.subscriptions.push(passive);
     context.subscriptions.push(
       vscode.commands.registerCommand('ewwBridge.showStatus', () => {
         void vscode.window.showInformationMessage(
-          `EWW Bridge 已由 ${ownership.ownerLabel ?? '其它窗口'} 接管：同一条聊天只能有一个写者，否则卡片会被来回覆盖。`,
+          `EWW Bridge：同一个项目已经由窗口「${ownership.ownerLabel ?? '其它'}」接管。不同项目请在不同文件夹打开窗口，或关闭重复窗口。`,
         );
       }),
     );
@@ -65,7 +66,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       context.subscriptions.push(
         vscode.commands.registerCommand(command, () => {
           void vscode.window.showWarningMessage(
-            `EWW Bridge：本窗口未启用（由 ${ownership.ownerLabel ?? '其它窗口'} 负责推送），请在接管窗口操作。`,
+            `EWW Bridge：本窗口未启用（项目 ${ownership.scope} 由 ${ownership.ownerLabel ?? '其它窗口'} 推送），请在接管窗口操作。`,
           );
         }),
       );

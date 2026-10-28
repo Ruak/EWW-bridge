@@ -3,10 +3,11 @@ import * as path from 'path';
 import { log } from './log';
 
 /**
- * 单写者锁：同一台机器上多个 VS Code 窗口都装了本扩展时，
+ * 单写者锁：同一个项目（同一个文件夹）被多个 VS Code 窗口打开时，
  * 只允许一个实例镜像聊天 / 发飞书，否则会把同一张卡片来回覆盖。
  *
- * 锁文件放在扩展的 globalStorage 下（跨窗口共享），带 pid 与心跳。
+ * 锁文件按项目路径分文件（bridge-owner-<scope>.json），不同项目窗口各自持有自己的锁：
+ * 每个项目对应各自的聊天会话与飞书目标，互不影响。
  */
 const TTL_MS = 15000;
 const HEARTBEAT_MS = 5000;
@@ -15,6 +16,7 @@ export interface Ownership {
   instanceId: string;
   owner: boolean;
   ownerLabel?: string;
+  scope: string;
   dispose(): void;
 }
 
@@ -22,12 +24,23 @@ interface LockBody {
   instanceId: string;
   pid: number;
   label: string;
+  scope: string;
   updatedAt: number;
 }
 
-export function acquireOwnership(storageDir: string, label: string): Ownership {
+/** 项目路径 -> 短哈希，用来给锁文件分桶 */
+function scopeHash(scope: string): string {
+  const text = scope.toLowerCase();
+  let hash = 0;
+  for (let i = 0; i < text.length; i++) {
+    hash = (hash * 31 + text.charCodeAt(i)) | 0;
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+export function acquireOwnership(storageDir: string, label: string, scope = 'default'): Ownership {
   const instanceId = Math.random().toString(36).slice(2, 10);
-  const lockFile = path.join(storageDir, 'bridge-owner.json');
+  const lockFile = path.join(storageDir, `bridge-owner-${scopeHash(scope)}.json`);
   let heartbeat: NodeJS.Timeout | undefined;
 
   const readLock = (): LockBody | undefined => {
@@ -55,7 +68,7 @@ export function acquireOwnership(storageDir: string, label: string): Ownership {
   const writeLock = (): boolean => {
     try {
       fs.mkdirSync(storageDir, { recursive: true });
-      const body: LockBody = { instanceId, pid: process.pid, label, updatedAt: Date.now() };
+      const body: LockBody = { instanceId, pid: process.pid, label, scope, updatedAt: Date.now() };
       fs.writeFileSync(lockFile, JSON.stringify(body), 'utf8');
       return true;
     } catch {
@@ -73,9 +86,10 @@ export function acquireOwnership(storageDir: string, label: string): Ownership {
       instanceId,
       owner: false,
       ownerLabel: existing.label,
+      scope,
       dispose: () => undefined,
     };
-    log(`inst: 另一个窗口已接管（${existing.label}, pid=${existing.pid}）本实例进入只读模式`);
+    log(`inst: 本项目已由窗口「${existing.label}」接管（pid=${existing.pid}, scope=${scope}）本实例进入被动模式`);
     return owned;
   }
 
@@ -96,11 +110,12 @@ export function acquireOwnership(storageDir: string, label: string): Ownership {
   if (heartbeat.unref) {
     heartbeat.unref();
   }
-  log(`inst: 取得写者锁（${label}, pid=${process.pid}, id=${instanceId}）`);
+  log(`inst: 取得写者锁（${label}, pid=${process.pid}, id=${instanceId}, scope=${scope}）`);
 
   return {
     instanceId,
     owner: true,
+    scope,
     dispose: () => {
       if (heartbeat) {
         clearInterval(heartbeat);
