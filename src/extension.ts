@@ -623,12 +623,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const elapsed =
         typeof event.elapsedMs === 'number' && event.elapsedMs > 0 ? `${Math.round(event.elapsedMs / 1000)}s` : '';
       const footer = [modelShort, elapsed].filter(Boolean).join(' · ');
-      // chatSessions 批量落盘有空窗：文本为空但已有思考/工具时，这不是终稿，继续等完整结果
+      const state = activeStreams.get(event.sessionId);
+      // chatSessions 的终稿可能没有正文（正文只在 transcript / 软结束里），此时必须沿用已有的
+      const carried = (state?.softFinalText ?? '').length >= (state?.lastAnswerText ?? '').length
+        ? state?.softFinalText ?? ''
+        : state?.lastAnswerText ?? '';
+      const effectiveText = event.text.trim() ? event.text : carried;
       const waitingMore =
-        !event.text.trim() && !aborted && (event.thinking.trim().length > 0 || event.tools.length > 0);
+        !effectiveText.trim() && !aborted && (event.thinking.trim().length > 0 || event.tools.length > 0);
       const answerText = waitingMore
         ? ''
-        : event.text || (aborted ? '（本轮在 VS Code 侧被中断，未产生文字输出）' : '（本轮没有文字输出）');
+        : effectiveText || (aborted ? '（本轮在 VS Code 侧被中断，未产生文字输出）' : '（本轮没有文字输出）');
       const chunks = splitMarkdown(answerText);
       const firstChunk = chunks.shift() ?? '';
       const cards = buildStreamingCards({
@@ -648,7 +653,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         footer: waitingMore ? '' : footer,
       });
       const key = `${event.sessionId}#${event.index}`;
-      const state = activeStreams.get(event.sessionId);
       const startedAt = state?.turnStartedAt || lastTurnStartedAt.get(event.sessionId) || 0;
       const staleByIndex = state?.requestIndex !== undefined && state.requestIndex !== event.index;
       const staleByTime = startedAt > 0 && (event.timestamp ?? 0) + 5000 < startedAt;

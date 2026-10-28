@@ -273,7 +273,7 @@ export class SessionWatcher {
     this.completedCount = this.completed.size;
     this.baselineIncomplete = requests.length > 0 && !!requests[requests.length - 1] && !isRequestComplete(requests[requests.length - 1]);
     this.lastChange = Date.now();
-    log(`watcher: attached ${this.sessionId}, baseline requests=${requests}, completed=${this.completedCount}, midTurn=${this.baselineIncomplete}`);
+    log(`watcher: attached ${this.sessionId}, baseline requests=${requests.length}, completed=${this.completedCount}, midTurn=${this.baselineIncomplete}`);
   }
 
   private readAppended(): boolean {
