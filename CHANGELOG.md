@@ -2,6 +2,13 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.3
+
+- **Removed the 60-update cap** that silently froze the card on long agent turns. Updates are now limited only by content change (and the single-flight queue), so a card can keep streaming for any number of steps
+- Patch skips now log their reason (`no messageId` / unchanged content)
+- Inbound turn-end detection uses the transcript's new **settled** signal (turn_end + quiet) instead of a 15s silence guess, so long tool runs no longer trigger a false "turn ended"
+- Liveness heartbeat (10s) now reuses the last known answer/tool list, so long turns keep showing progress instead of going silent
+
 ## 1.0.2
 
 - Background terminal notifications (`[Terminal …]` steering messages) are no longer treated as turn interruptions: transcript keeps accumulating, the streaming card state is preserved, and no spurious "已中断" card/queue release happens

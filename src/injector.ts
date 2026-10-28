@@ -250,9 +250,11 @@ export class Injector {
         sawBusy = true;
       }
       const quietFor = Date.now() - (this.transcript?.lastActivity ?? startedAt);
-      // chatSessions 在工具循环/后台终端通知时会短暂显示空闲，必须再等实时源静默
-      if (sawBusy && !this.watcher.isBusy() && quietFor > 15000) {
-        return 'ended';
+      // 以 transcript 的“已落定”信号为准；没有实时源时才退回静默判定
+      if (sawBusy && !this.watcher.isBusy()) {
+        if (this.transcript ? this.transcript.settled : quietFor > 15000) {
+          return 'ended';
+        }
       }
       if (Date.now() - startedAt > 120000 && quietFor > 120000) {
         return 'ended';

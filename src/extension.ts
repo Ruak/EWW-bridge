@@ -130,6 +130,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     /** 单飞渲染：最近一帧待推内容与在途任务 */
     pendingPatch?: CardPair;
     patching?: Promise<void>;
+    /** 最近一次收到的正文/工具，供心跳卡片复用，避免长回合无内容可推 */
+    lastAnswerText?: string;
+    lastTools?: string[];
   }
   const activeStreams = new Map<string, TurnStream>();
   const finalized = new Map<string, string>();
@@ -218,7 +221,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const patchStreamCard = async (state: TurnStream, cards: CardPair): Promise<void> => {
-    if (!state.messageId || state.patches >= 60 || state.lastRendered === cards.v2) {
+    if (!state.messageId) {
+      log('outbound: patch skipped (no messageId)');
+      return;
+    }
+    if (state.lastRendered === cards.v2) {
+      // 内容没变化，不推（长回合可以无限次更新，不再有次数上限）
       return;
     }
     const startedAt = Date.now();
@@ -271,14 +279,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const since = Date.now();
     const timer = setInterval(() => {
       const state = activeStreams.get(sessionId);
-      if (!state || state.doneAt || state.softFinalText || state.patches > 1) {
+      if (!state || state.doneAt || state.softFinalText) {
         stopHeartbeat(sessionId);
         return;
       }
       const secs = Math.max(1, Math.round((Date.now() - since) / 1000));
       const cards = buildStreamingCards({
         title: 'Copilot · 处理中…',
-        status: `已等待 ${secs}s…`,
+        tools: state.lastTools ?? [],
+        answer: state.lastAnswerText ?? '',
+        status: `进行中…（已等待 ${secs}s）`,
         expanded: false,
         showThinking: false,
       });
@@ -293,7 +303,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           logError('heartbeat patch failed', error);
         }
       })();
-    }, 3000);
+    }, 10000);
     heartbeats.set(sessionId, timer);
   };
   heartbeatCleanup = () => {
@@ -358,6 +368,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           return;
         }
         state.softFinalText = event.text;
+        state.lastAnswerText = event.text;
+        state.lastTools = event.tools;
       }
       const cards = buildStreamingCards({
         title: 'Copilot',
@@ -482,6 +494,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             showThinking: config.forwardThinking,
           });
           const existing = activeStreams.get(event.sessionId);
+          if (existing) {
+            existing.lastAnswerText = event.text;
+            existing.lastTools = event.tools;
+          }
           if (existing?.messageId) {
             await queueStreamCard(existing, cards);
             return;
@@ -577,6 +593,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             showThinking: config.forwardThinking,
           });
           const state = await pushStreamCard(event.sessionId, chatId, cards);
+          state.lastAnswerText = event.text;
+          state.lastTools = event.tools;
           await queueStreamCard(state, cards);
         } catch (error) {
           logError('outbound partial failed', error);
@@ -638,6 +656,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       if (state && state.requestIndex === undefined) {
         state.requestIndex = event.index;
+      }
+      if (state) {
+        state.lastAnswerText = event.text;
+        state.lastTools = event.tools;
       }
       // 防止软结束（transcript 完整）被更短的最终文本覆盖导致“截断”
       if (state?.softFinalText && !aborted && !waitingMore) {

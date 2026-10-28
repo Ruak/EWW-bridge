@@ -42,6 +42,7 @@ export class TranscriptWatcher {
 
   private turnEndedAt = 0;
   private softFinalSent = false;
+  private settledAt = 0;
 
   onDelta?: (event: StreamDelta) => void;
   onSoftFinal?: (event: StreamDelta) => void;
@@ -81,6 +82,11 @@ export class TranscriptWatcher {
     return this.sessionId;
   }
 
+  /** 本轮是否已真正落定（turn_end 后静默超过阈值），供结束判定使用 */
+  get settled(): boolean {
+    return this.settledAt > 0;
+  }
+
   /** 回合结束后清空累计，下一轮重新开始 */
   reset(): void {
     this.thinking = '';
@@ -90,6 +96,7 @@ export class TranscriptWatcher {
     this.lastEmitAt = 0;
     this.turnEndedAt = 0;
     this.softFinalSent = false;
+    this.settledAt = 0;
     this.active = false;
   }
 
@@ -224,11 +231,13 @@ export class TranscriptWatcher {
       this.active = true;
       this.turnEndedAt = 0;
       this.softFinalSent = false;
+      this.settledAt = 0;
       this.lastEventAt = Date.now();
       return;
     }
     if (type === 'assistant.turn_start') {
       this.active = true;
+      this.settledAt = 0;
       return;
     }
     if (type === 'assistant.message') {
@@ -248,12 +257,14 @@ export class TranscriptWatcher {
       }
       this.turnEndedAt = 0;
       this.softFinalSent = false;
+      this.settledAt = 0;
     } else if (type === 'tool.execution_start') {
       if (typeof data.toolName === 'string') {
         this.pushTool(data.toolName);
       }
       this.turnEndedAt = 0;
       this.softFinalSent = false;
+      this.settledAt = 0;
     } else if (type === 'assistant.turn_end') {
       // 每条模型消息结束都会触发；若后续没有工具/新消息，则视为回合结束
       this.turnEndedAt = Date.now();
@@ -271,11 +282,12 @@ export class TranscriptWatcher {
     if (Date.now() - this.turnEndedAt < this.softFinalIdleMs) {
       return;
     }
+    this.settledAt = Date.now();
+    this.softFinalSent = true;
+    this.active = false;
     if (!this.thinking && !this.text && this.tools.length === 0) {
       return;
     }
-    this.softFinalSent = true;
-    this.active = false;
     this.onSoftFinal?.({
       sessionId: this.sessionId,
       thinking: this.thinking,
