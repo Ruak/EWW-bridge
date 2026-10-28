@@ -413,8 +413,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     transcript.onUserPrompt = (event) => {
       // 新一轮开始：上一轮的卡片要么已软结束（保留终稿），要么立即收尾，避免被新回合覆盖
-      const previous = activeStreams.get(event.sessionId);
-      // 刚注入时建的占位卡（还没有任何内容）才属于这一轮；有内容的卡说明上一轮已完成，必须释放
+      const previous = activeStreams.get(event.sessionId);      // 刚注入时建的占位卡（还没有任何内容）才属于这一轮；有内容的卡说明上一轮已完成，必须释放
       const hasContent =
         !!previous &&
         (!!previous.softFinalText ||
@@ -426,7 +425,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         stopHeartbeat(event.sessionId);
         activeStreams.delete(event.sessionId);
       }
-      lastTurnStartedAt.set(event.sessionId, Date.now());
+      // transcript 只知“何时看到提问”，chatSessions 的 request.timestamp 才是回合起点：同一个回合内取较早值
+      const now = Date.now();
+      const knownStart = lastTurnStartedAt.get(event.sessionId) ?? 0;
+      lastTurnStartedAt.set(
+        event.sessionId,
+        knownStart > 0 && now - knownStart < 600000 ? Math.min(knownStart, now) : now,
+      );
       const config = readConfig();
       if (!config.forwardUser) {
         return;
@@ -515,7 +520,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         log('outbound: skip terminal notification user message');
         return;
       }
-      lastTurnStartedAt.set(event.sessionId, event.timestamp || Date.now());
+      const promptStart = lastTurnStartedAt.get(event.sessionId) ?? 0;
+      const eventStart = event.timestamp || Date.now();
+      const sameTurn = promptStart > 0 && Math.abs(eventStart - promptStart) < 600000;
+      lastTurnStartedAt.set(event.sessionId, sameTurn ? Math.min(promptStart, eventStart) : eventStart);
       let stream = activeStreams.get(event.sessionId);
       // 卡片上已经有内容（正文/软结束/已多次 patch/已定稿）时，新提问必须换新卡，否则短回答会覆盖上一轮长回答
       if (stream) {
@@ -556,6 +564,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         log(`outbound: user request #${event.index} (${event.text.length}ch)`);
         void feishu.sendMarkdown(chatId, '你 · VS Code', event.text, 'grey', true);
       }
+      // 无论发没发都登记，保证 transcript 迟到时不会再发一张重复的提问卡
+      seenUserPrompts.set(normalized, Date.now());
       if (config.forwardAssistant && config.forwardStreaming && !activeStreams.get(event.sessionId)?.messageId) {
         void pushStreamCard(
           event.sessionId,
@@ -566,7 +576,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             expanded: false,
             showThinking: config.forwardThinking,
           }),
-        );
+        ).then((created) => {
+          // 占位卡从创建起就绑定回合下标，否则最终结果无法校验归属，迟到结果会写错卡
+          if (created.requestIndex === undefined) {
+            created.requestIndex = event.index;
+          }
+          if (!created.turnStartedAt) {
+            created.turnStartedAt = eventStart;
+          }
+          if (created.messageId) {
+            saveStreamState(event.sessionId, created.messageId, created.requestIndex);
+          }
+        });
       }
     };
 
@@ -663,10 +684,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const key = `${event.sessionId}#${event.index}`;
       const startedAt = state?.turnStartedAt || lastTurnStartedAt.get(event.sessionId) || 0;
       const staleByIndex = state?.requestIndex !== undefined && state.requestIndex !== event.index;
-      const staleByTime = startedAt > 0 && (event.timestamp ?? 0) + 5000 < startedAt;
-      if (state && (staleByIndex || staleByTime)) {
-        log(`outbound: 丢弃迟到结果 #${event.index}（卡片属于 #${state.requestIndex ?? '?'}）`);
+      // 时间判定只作兜底：两个数据源对“回合起点”的观测可能差几秒，阈值必须放宽
+      const staleByTime =
+        startedAt > 0 && typeof event.timestamp === 'number' && event.timestamp > 0
+          ? event.timestamp + 120000 < startedAt
+          : false;
+      if (state && staleByIndex) {
+        log(
+          `outbound: 丢弃迟到结果 #${event.index}（卡片属于 #${state.requestIndex}，` +
+            `事件时间 ${event.timestamp ?? '-'}，回合起点 ${startedAt || '-'}）`,
+        );
         return;
+      }
+      if (state && staleByTime) {
+        // 卡片还没绑定回合时宁可接受最新结果，也不要让它永远停在“处理中”
+        if (state.requestIndex === undefined) {
+          log(`outbound: 卡片未绑定回合，接受 #${event.index}（时间判定仅供参考，起点 ${startedAt}）`);
+        } else {
+          log(
+            `outbound: 丢弃迟到结果 #${event.index}（卡片属于 #${state.requestIndex}，` +
+              `事件时间 ${event.timestamp ?? '-'}，回合起点 ${startedAt || '-'}）`,
+          );
+          return;
+        }
       }
       if (!state && staleByTime) {
         log(`outbound: 丢弃无主迟到结果 #${event.index}`);

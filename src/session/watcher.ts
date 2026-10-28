@@ -77,6 +77,8 @@ export class SessionWatcher {
   private lastPatchErrorLog = 0;
   /** 尾部解析模式：允许补丁路径自动创建 */
   private lenient = false;
+  /** 激活时的最后一条请求下标；比它更早的历史回合迟到补丁不得重放 */
+  private replayFloor = 0;
 
   /** 流式预览的最小间隔（毫秒），由扩展按设置更新 */
   partialIntervalMs = 800;
@@ -290,6 +292,9 @@ export class SessionWatcher {
     const state = this.state as SessionState | undefined;
     const requests: any[] = (state?.requests as any[]) ?? [];
     this.seenRequests = requests.length;
+    // 尾部解析时历史回合的补丁可能迟到落盘（例如数小时前的请求才补上 result）：
+    // 只允许“最后一条（可能仍在跑）”及其之后的新请求触发终稿
+    this.replayFloor = Math.max(0, requests.length - 1);
     for (let i = 0; i < requests.length; i++) {
       const request = requests[i];
       if (request && isRequestComplete(request)) {
@@ -488,6 +493,9 @@ export class SessionWatcher {
     for (let i = 0; i < requests.length; i++) {
       const request = requests[i];
       if (!request) {
+        continue;
+      }
+      if (i < this.replayFloor) {
         continue;
       }
       if (requestText(request).startsWith('[Terminal ')) {
