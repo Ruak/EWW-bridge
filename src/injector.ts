@@ -101,7 +101,7 @@ export class Injector {
         task.onDeliveryFailed?.();
       } else {
         log('inject: submitted to active chat');
-        const outcome = await this.waitForTurnEnd(assistantBefore, task.timeoutMs);
+        const outcome = await this.waitForTurnEnd(assistantBefore, statusBefore?.requests ?? 0, task.timeoutMs);
         if (outcome === 'timeout') {
           task.onTimeout?.();
           log('inject: timeout waiting for turn completion');
@@ -234,6 +234,7 @@ export class Injector {
    */
   private async waitForTurnEnd(
     assistantCountBefore: number,
+    requestsBefore: number,
     timeoutMs: number,
   ): Promise<'completed' | 'ended' | 'timeout'> {
     if (!this.watcher) {
@@ -241,24 +242,28 @@ export class Injector {
     }
     const startedAt = Date.now();
     const deadline = startedAt + timeoutMs;
-    let sawBusy = false;
     while (Date.now() < deadline) {
       if (this.watcher.assistantMessages > assistantCountBefore) {
         return 'completed';
       }
-      if (this.watcher.isBusy()) {
-        sawBusy = true;
+      const status = this.watcher.getStatus();
+      if (status.requests > requestsBefore) {
+        const latest = this.watcher.latestStatus();
+        if (latest === 'completed') {
+          return 'completed';
+        }
+        if (latest === 'aborted') {
+          return 'ended';
+        }
       }
+      // 兜底：只在新请求长时间无任何动静时才判结束（5 分钟）
       const quietFor = Date.now() - (this.transcript?.lastActivity ?? startedAt);
       const toolBusy = this.transcript?.toolInFlight ?? 0;
-      // 不用 turn_end 推断：agent 模式每步都会 turn_end。只有“长时间静默 + 无在途工具”才认为回合结束
-      if (sawBusy && !this.watcher.isBusy() && quietFor > 60000 && toolBusy === 0) {
+      if (!this.watcher.isBusy() && quietFor > 300000 && toolBusy === 0) {
+        log('inject: 新请求 5 分钟无任何动静，判定为已结束');
         return 'ended';
       }
-      if (Date.now() - startedAt > 180000 && quietFor > 180000 && toolBusy === 0) {
-        return 'ended';
-      }
-      await delay(300);
+      await delay(500);
     }
     return 'timeout';
   }

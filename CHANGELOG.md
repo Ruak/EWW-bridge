@@ -2,6 +2,16 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.9
+
+- **“上一轮已结束”误报修复**：注入后的结束判定不再依赖“60s 静默”，而是只看该请求的权威状态 —— `result` 出现 = 完成，`elapsedMs=0` 且无 `result` = 中断；静默仅在 5 分钟无任何动静时作兜底
+- 新增 `SessionWatcher.latestStatus()`（pending / completed / aborted / unknown），只统计非 terminal-notification 请求
+
+## 1.0.8
+
+- **Final events with no text no longer blank the card.** `chatSessions` often finishes a turn with `text: 0` while the answer only exists in transcripts/soft-final; the final card now carries the last known answer instead of rebuilding an empty “仍在处理” card (this was wiping a 1974-char answer down to 598 bytes of tool labels)
+- Fixed `baseline requests=[object Object]` log output
+
 ## 1.0.7
 
 - **A new user turn can no longer overwrite the previous answer card.** Cards are released (not reused) as soon as a new prompt arrives and the existing card already has content; the old card is left intact instead of being replaced with a short status card
