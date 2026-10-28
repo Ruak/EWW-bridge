@@ -302,14 +302,15 @@ export function buildStreamingCards(options: StreamingCardOptions): CardPair {
     if (withThinking && showThinking && thinking) {
       elements.push(buildThoughtPanel(tail(thinking, thinkingLimit), options.expanded));
     }
+    if (answer) {
+      elements.push({ tag: 'markdown', content: tail(answer, answerLimit) });
+    }
+    // 进行中的工具/状态放在正文下面：正文会不断增长，放上面会被顶出视野
     if (tools.length > 0) {
       elements.push({
         tag: 'markdown',
         content: ['**进行中**', ...tools.slice(-10).map((tool) => `- ${toolLabelForCard(tool)}`)].join('\n'),
       });
-    }
-    if (answer) {
-      elements.push({ tag: 'markdown', content: tail(answer, answerLimit) });
     }
     if (status) {
       elements.push({ tag: 'markdown', content: `_${status}_` });
@@ -339,11 +340,11 @@ export function buildStreamingCards(options: StreamingCardOptions): CardPair {
         .join('\n');
       sections.push(['**思考过程**', quote].join('\n'));
     }
-    if (tools.length > 0) {
-      sections.push(['**进行中**', ...tools.slice(-10).map((tool) => `- ${toolLabelForCard(tool)}`)].join('\n'));
-    }
     if (answer) {
       sections.push(tail(answer, answerLimit));
+    }
+    if (tools.length > 0) {
+      sections.push(['**进行中**', ...tools.slice(-10).map((tool) => `- ${toolLabelForCard(tool)}`)].join('\n'));
     }
     if (status) {
       sections.push(`_${status}_`);

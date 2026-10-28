@@ -871,6 +871,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       state.lastAnswerText = answer;
       state.pendingTextLen = answer.length;
       void queueStreamCard(state, cards).catch((error) => logError('outbound tail text failed', error));
+      log(`outbound: 补丁流正文 ${answer.length}ch（transcript 静默 ${Math.round((transcript?.quietMs ?? 0) / 1000)}s）`);
+    };
+
+    // 补丁流里出现 result = 回合真正结束（chatSessions 常常比 transcript 先落盘）
+    watcher.onTailComplete = (event) => {
+      const state = activeStreams.get(event.sessionId);
+      if (!state?.messageId || state.doneAt) {
+        return;
+      }
+      const startedAt = lastTurnStartedAt.get(event.sessionId) ?? 0;
+      if (startedAt > 0 && event.firstAt < startedAt - 5000) {
+        log('outbound: 忽略旧回合的 result');
+        return;
+      }
+      const answer = pickLonger(event.text, state.lastAnswerText ?? '');
+      if (!answer.trim() || !sameStory(state.lastAnswerText ?? '', answer)) {
+        return;
+      }
+      state.lastAnswerText = answer;
+      state.pendingTextLen = answer.length;
+      log(`outbound: 补丁流收到 result #${event.index}，立即收尾（${answer.length}ch）`);
+      void finalizeSettledCard(state);
     };
 
     watcher.onUser = (event) => {

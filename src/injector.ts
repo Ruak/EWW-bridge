@@ -109,7 +109,7 @@ export class Injector {
         task.onDeliveryFailed?.();
       } else {
         log('inject: submitted to active chat');
-        const outcome = await this.waitForTurnEnd(assistantBefore, statusBefore?.requests ?? 0, task.timeoutMs);
+        const outcome = await this.waitForTurnEnd(assistantBefore, statusBefore?.requests ?? 0, promptBefore, task.timeoutMs);
         if (outcome === 'timeout') {
           task.onTimeout?.();
           log('inject: timeout waiting for turn completion');
@@ -256,6 +256,7 @@ export class Injector {
   private async waitForTurnEnd(
     assistantCountBefore: number,
     requestsBefore: number,
+    promptCountBefore: number,
     timeoutMs: number,
   ): Promise<'completed' | 'ended' | 'timeout'> {
     if (!this.watcher && !this.transcript) {
@@ -263,7 +264,6 @@ export class Injector {
     }
     const startedAt = Date.now();
     const deadline = startedAt + timeoutMs;
-    let sawActivity = false;
     while (Date.now() < deadline) {
       if (this.watcher && !this.watcher.partialState && this.watcher.assistantMessages > assistantCountBefore) {
         return 'completed';
@@ -279,11 +279,10 @@ export class Injector {
         }
       }
       if (this.transcript) {
-        if (this.transcript.lastActivity >= startedAt || this.transcript.settledAtMs >= startedAt) {
-          sawActivity = true;
-        }
-        // transcript 是实时源：turn 闭合 + 无在途工具 + 静默 3s 就是真结束，不必等 chatSessions 的 result
-        if (sawActivity && !this.transcript.isTurnRunning() && this.transcript.quietMs > 3000) {
+        // 关键：必须先看到“本次投递”的 user.message。transcript 落盘会迟到，
+        // 上一次回合的旧事件会在注入后才刷出来，不区分就会把旧回合的结束当成本轮结束。
+        const ourTurnStarted = this.transcript.userPromptCount > promptCountBefore;
+        if (ourTurnStarted && !this.transcript.isTurnRunning() && this.transcript.quietMs > 3000) {
           log(`inject: transcript 已落定（静默 ${Math.round(this.transcript.quietMs / 1000)}s），本轮结束`);
           return 'completed';
         }

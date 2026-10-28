@@ -96,6 +96,8 @@ export class SessionWatcher {
   onPartial?: (event: AssistantEvent) => void;
   /** 从补丁流里实时抽到的最新回合正文（不依赖下标，后台等待期也能拿到） */
   onTailText?: (event: { sessionId: string; text: string; firstAt: number }) => void;
+  /** 补丁流里出现了某回合的 result（权威完成信号，比 transcript 的 turn_end 更快落盘时用它收尾） */
+  onTailComplete?: (event: { sessionId: string; index: number; text: string; firstAt: number }) => void;
 
   constructor(private readonly chatSessionsDir: string, private readonly pollMs = 300) {}
 
@@ -538,8 +540,20 @@ export class SessionWatcher {
       return;
     }
     const index = typeof path[1] === 'number' ? path[1] : undefined;
-    const isResponse = path[2] === 'response';
-    if (index === undefined || !isResponse) {
+    if (index === undefined) {
+      return;
+    }
+    if (path[2] === 'result') {
+      const done = this.tailTexts.get(index);
+      this.onTailComplete?.({
+        sessionId: this.sessionId,
+        index,
+        text: done?.text ?? '',
+        firstAt: done?.firstAt ?? Date.now(),
+      });
+      return;
+    }
+    if (path[2] !== 'response') {
       return;
     }
     const now = Date.now();
