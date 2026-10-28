@@ -428,6 +428,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         stopHeartbeat(sessionId);
         return;
       }
+      // VS Code 偶尔不写 turn_end：事件停了且无在途工具时主动收尾，否则卡片会永远停在“处理中”
+      if (!top && transcript?.cardSettled && state.messageId) {
+        void finalizeSettledCard(state);
+        return;
+      }
       const secs = Math.max(1, Math.round((Date.now() - since) / 1000));
       const runningFor = top ? Math.max(1, Math.round((Date.now() - top.startedAt) / 1000)) : 0;
       const status = top
@@ -465,6 +470,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       clearInterval(timer);
     }
     heartbeats.clear();
+  };
+
+  /** 收尾兜底：transcript 已静默且无在途工具，但始终没收到 turn_end（VS Code 漏写） */
+  const finalizeSettledCard = async (state: TurnStream): Promise<void> => {
+    const config = readConfig();
+    const answer = state.lastAnswerText ?? '';
+    const cards = buildStreamingCards({
+      title: 'Copilot',
+      tools: cardTools(config, state.lastTools ?? []),
+      answer: answer || '（本轮没有文字输出）',
+      expanded: false,
+      showThinking: false,
+      answerLimit: 12000,
+      footer: transcript?.elapsedMs ? `${Math.round((transcript.elapsedMs ?? 0) / 1000)}s` : '',
+    });
+    state.pendingTextLen = answer.length;
+    state.softFinalText = answer;
+    state.doneAt = Date.now();
+    stopHeartbeat(state.sessionId);
+    try {
+      await queueStreamCard(state, cards);
+      log(`outbound: 事件已停止，主动收尾卡片 #${state.messageId?.slice(-8) ?? '-'}（${answer.length}ch）`);
+    } catch (error) {
+      logError('outbound settled finalize failed', error);
+    }
   };
 
   // 实时增量：transcript（回合进行中也会写）

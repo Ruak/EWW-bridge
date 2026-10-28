@@ -46,6 +46,8 @@ export class TranscriptWatcher {
   partialIntervalMs = 500;
   /** turn_end 后静默多久视为回合结束（毫秒） */
   softFinalIdleMs = 800;
+  /** 没有 turn_end 时的静默兜底阈值（VS Code 偶尔漏写 turn_end） */
+  stallIdleMs = 5000;
 
   private turnEndedAt = 0;
   private softFinalSent = false;
@@ -124,9 +126,18 @@ export class TranscriptWatcher {
   /**
    * 回合是否仍在运行：模型步未 turn_end（含长思考）或有在途工具（含长终端命令）。
    * 注入前必须用它判定，绝不能在为 true 时提交，否则会打断 VS Code 正在输出的消息。
+   * 注意：VS Code 偶尔不写 turn_end（已在实测中遇到），静默 2 分钟后不再当作运行中，否则队列永远卡住。
    */
   isTurnRunning(): boolean {
-    return this.turnOpen || this.toolInFlightCount > 0;
+    if (this.toolInFlightCount > 0) {
+      return true;
+    }
+    return this.turnOpen && this.quietMs < 120000;
+  }
+
+  /** 卡片收尾用：无在途工具且静默够久（不依赖 turn_end，VS Code 有时确实不写） */
+  get cardSettled(): boolean {
+    return this.toolInFlightCount === 0 && this.quietMs > this.stallIdleMs;
   }
 
   /** 距离最近一条 transcript 事件的静默毫秒数 */
@@ -171,6 +182,7 @@ export class TranscriptWatcher {
         return;
       }
       this.readAppended();
+      this.pruneStaleTools();
       this.flush();
       this.maybeSoftFinal();
     } catch (error) {
@@ -429,15 +441,21 @@ export class TranscriptWatcher {
   }
 
   private maybeSoftFinal(): void {
-    if (!this.turnEndedAt || this.softFinalSent) {
+    if (this.softFinalSent) {
       return;
     }
-    if (Date.now() - this.turnEndedAt < this.softFinalIdleMs) {
+    // 有 turn_end 时按 800ms 静默；没有 turn_end（VS Code 漏写）时用 5s 静默兜底
+    if (this.turnEndedAt) {
+      if (Date.now() - this.turnEndedAt < this.softFinalIdleMs) {
+        return;
+      }
+    } else if (this.toolInFlightCount > 0 || this.quietMs < this.stallIdleMs) {
       return;
     }
     this.settledAt = Date.now();
     this.softFinalSent = true;
     this.active = false;
+    this.turnOpen = false;
     if (this.silent || !this.thinking && !this.text && this.tools.length === 0) {
       return;
     }
@@ -447,6 +465,21 @@ export class TranscriptWatcher {
       text: this.text,
       tools: [...this.tools],
     });
+  }
+
+  /** 工具 start 后没等到 complete（回合被取消/中断）会永久占住“在途”，超过 5 分钟就丢弃 */
+  private pruneStaleTools(): void {
+    if (this.toolStarts.size === 0) {
+      return;
+    }
+    const now = Date.now();
+    for (const [id, tool] of this.toolStarts) {
+      if (now - tool.startedAt > 300000) {
+        this.toolStarts.delete(id);
+        this.toolInFlightCount = Math.max(0, this.toolInFlightCount - 1);
+        log(`transcript: 丢弃超时未完成的工具记录 ${tool.name}`);
+      }
+    }
   }
 
   private appendThinking(chunk: string): void {

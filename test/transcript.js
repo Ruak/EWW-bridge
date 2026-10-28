@@ -27,6 +27,7 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   const watcher = new TranscriptWatcher(dir, 80);
   watcher.partialIntervalMs = 50;
   watcher.softFinalIdleMs = 120;
+  watcher.stallIdleMs = 600000;
   const deltas = [];
   const sessions = [];
   const softFinals = [];
@@ -153,6 +154,24 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   const latest = deltas[deltas.length - 1];
   if (latest.text !== '新回答' || latest.thinking !== '新思考') {
     throw new Error(`新回合携带了旧内容: ${JSON.stringify(latest)}`);
+  }
+
+  // 6) VS Code 漏写 turn_end：只发 turn_start + assistant.message，静默后也必须收尾
+  watcher.stallIdleMs = 200;
+  const softBefore = softFinals.length;
+  append({ type: 'user.message', data: { content: '漏掉 turn_end 的提问' } });
+  await delay(60);
+  append({ type: 'assistant.turn_start', data: {} });
+  append({ type: 'assistant.message', data: { content: '这段回答不会收到 turn_end' } });
+  await delay(500);
+  if (softFinals.length <= softBefore) {
+    throw new Error('没有 turn_end 时也必须在静默后触发收尾（否则卡片会永远停在处理中）');
+  }
+  if (!softFinals[softFinals.length - 1].text.includes('不会收到 turn_end')) {
+    throw new Error('收尾未携带正文');
+  }
+  if (!watcher.cardSettled) {
+    throw new Error('静默且无在途工具时应判定可以收尾');
   }
 
   watcher.stop();

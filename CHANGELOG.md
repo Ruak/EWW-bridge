@@ -2,6 +2,15 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.16
+
+- **卡片永远停在“处理中”修复**：实测 transcript 最后一条是 `assistant.turn_start`，**VS Code 没有写 `assistant.turn_end`**，于是 `turnEndedAt` 恒为 0、软结束永不触发
+  - 无 `turn_end` 时按 **5s 静默** 兜底收尾（有 `turn_end` 仍按 800ms）
+  - 心跳在“无在途工具 + 已静默”时主动收尾一次（`finalizeSettledCard`），日志 `事件已停止，主动收尾卡片`
+  - `tool.execution_start` 后没等到 `complete`（回合被取消）超过 5 分钟自动丢弃，不再永久占住“在途工具”
+- **注入队列不再永久卡死**：`isTurnRunning()` 对“漏写 turn_end”的回合最多再等 120s，之后放行；正常回合仍严格等真实结束
+- 新增“缺 turn_end 必须收尾”回归用例
+
 ## 1.0.15
 
 - **“不知哪来的消息乱入”真因修复**：会话文件 312MB 时只能尾部解析，`requests` 是**稀疏数组**、下标与真实回合号完全对不上（日志里尾部最大下标只有 272，而实际已到 4xx）。启动时把“最后一条”当成未完成回合重放 → 卡片被三小时前的 `#272`（1052ch）覆盖，真实新回合的 530ch 反被回退守卫拦下，表现就是“乱入 + 不同步”
