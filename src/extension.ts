@@ -414,27 +414,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     transcript.onUserPrompt = (event) => {
       // 新一轮开始：上一轮的卡片要么已软结束（保留终稿），要么立即收尾，避免被新回合覆盖
       const previous = activeStreams.get(event.sessionId);
-      // 刚注入时建的占位卡就是这一轮自己的，不能当成"上一轮"清掉，否则会另建第二张卡
-      const placeholderForThisPrompt =
+      // 刚注入时建的占位卡（还没有任何内容）才属于这一轮；有内容的卡说明上一轮已完成，必须释放
+      const hasContent =
         !!previous &&
-        !previous.doneAt &&
-        !previous.softFinalText &&
-        previous.requestIndex === undefined &&
-        Date.now() - previous.lastPatchAt < 60000;
-      if (previous && !placeholderForThisPrompt && previous.softFinalText) {
-        // 上一轮已定稿，直接丢弃状态，新回合会新建卡片
-        activeStreams.delete(event.sessionId);
-      } else if (previous && !placeholderForThisPrompt) {
-        if (previous.messageId) {
-          void feishu?.patchCardPair(
-            previous.messageId,
-            buildStreamingCards({
-              title: 'Copilot · 已结束',
-              status: '新一轮已开始，本轮到此为止',
-              expanded: false,
-            }),
-          );
-        }
+        (!!previous.softFinalText ||
+          !!previous.doneAt ||
+          previous.patches > 1 ||
+          (previous.lastAnswerText ?? '').length > 0);
+      if (previous && hasContent) {
+        // 直接释放状态，保留上一轮卡片原样（不再用状态卡覆盖长回答）
         stopHeartbeat(event.sessionId);
         activeStreams.delete(event.sessionId);
       }
@@ -528,12 +516,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       lastTurnStartedAt.set(event.sessionId, event.timestamp || Date.now());
       let stream = activeStreams.get(event.sessionId);
-      if (stream && stream.requestIndex !== undefined && stream.requestIndex !== event.index) {
-        // 新一轮：上一轮的卡片已完成，释放状态，本轮重新建卡
-        stopHeartbeat(event.sessionId);
-        activeStreams.delete(event.sessionId);
-        clearStreamState();
-        stream = undefined;
+      // 卡片上已经有内容（正文/软结束/已多次 patch/已定稿）时，新提问必须换新卡，否则短回答会覆盖上一轮长回答
+      if (stream) {
+        const hasContent =
+          !!stream.softFinalText ||
+          !!stream.doneAt ||
+          stream.patches > 1 ||
+          (stream.lastAnswerText ?? '').length > 0;
+        const changedTurn = stream.requestIndex !== undefined && stream.requestIndex !== event.index;
+        if (hasContent || changedTurn) {
+          log(`outbound: 新一轮 #${event.index}，上一轮的卡片已保留（不再覆盖）`);
+          stopHeartbeat(event.sessionId);
+          activeStreams.delete(event.sessionId);
+          clearStreamState();
+          stream = undefined;
+        }
       }
       if (stream) {
         stream.requestIndex = event.index;

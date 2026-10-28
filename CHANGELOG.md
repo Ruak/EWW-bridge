@@ -2,6 +2,11 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.7
+
+- **A new user turn can no longer overwrite the previous answer card.** Cards are released (not reused) as soon as a new prompt arrives and the existing card already has content; the old card is left intact instead of being replaced with a short status card
+- Removed the silent rebinding of a content-bearing card to a new request index (the cause of a 1.3k-char answer being replaced by a 24-char reply)
+
 ## 1.0.6
 
 - Diagnostics for the remaining latency: every ≥80 char text growth logs `transcript: 正文累计 Nch`, and every ≥80 char card update logs `outbound: 卡片正文 Nch 已发送`. The gap between the two lines is bridge latency; if a text line is missing, the delay is upstream (model/transcript)
