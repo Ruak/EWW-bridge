@@ -81,6 +81,14 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   if (!second.text.includes('开始分析')) {
     throw new Error('累计正文丢失');
   }
+  if (watcher.toolInFlight !== 1) {
+    throw new Error(`工具在途计数错误: ${watcher.toolInFlight}`);
+  }
+  append({ type: 'tool.execution_complete', data: { toolName: 'run_in_terminal' } });
+  await delay(200);
+  if (watcher.toolInFlight !== 0) {
+    throw new Error(`工具完成后计数未清零: ${watcher.toolInFlight}`);
+  }
 
   // 2.5) turn_end 后静默 → 软结束（不再等 chatSessions）
   append({ type: 'assistant.turn_end', data: {} });

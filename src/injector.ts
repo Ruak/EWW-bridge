@@ -250,13 +250,12 @@ export class Injector {
         sawBusy = true;
       }
       const quietFor = Date.now() - (this.transcript?.lastActivity ?? startedAt);
-      // 以 transcript 的“已落定”信号为准；没有实时源时才退回静默判定
-      if (sawBusy && !this.watcher.isBusy()) {
-        if (this.transcript ? this.transcript.settled : quietFor > 15000) {
-          return 'ended';
-        }
+      const toolBusy = this.transcript?.toolInFlight ?? 0;
+      // 不用 turn_end 推断：agent 模式每步都会 turn_end。只有“长时间静默 + 无在途工具”才认为回合结束
+      if (sawBusy && !this.watcher.isBusy() && quietFor > 60000 && toolBusy === 0) {
+        return 'ended';
       }
-      if (Date.now() - startedAt > 120000 && quietFor > 120000) {
+      if (Date.now() - startedAt > 180000 && quietFor > 180000 && toolBusy === 0) {
         return 'ended';
       }
       await delay(300);

@@ -2,6 +2,13 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.4
+
+- **Removed the sticky `suppressStreamingUntilTurnEnd` flag** that could swallow an entire turn after a mid-turn reload (observed: 3m22s of silence until an unrelated terminal notification cleared it). Streaming now starts from the current progress
+- **Answers are merged from both sources**: transcript text and the chatSessions response text, whichever is longer wins (agent mode writes visible text mainly to chatSessions)
+- **Turn-end detection** for the queue no longer trusts per-step `assistant.turn_end`; it requires 60s of real silence and no tool in flight (`toolInFlight` counter)
+- New `toolInFlight` metric in the transcript watcher with unit coverage
+
 ## 1.0.3
 
 - **Removed the 60-update cap** that silently froze the card on long agent turns. Updates are now limited only by content change (and the single-flight queue), so a card can keep streaming for any number of steps

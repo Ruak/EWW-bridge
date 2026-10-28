@@ -183,11 +183,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   const lastTurnStartedAt = new Map<string, number>();
   let suppressDeltaUntil = 0;
-  // 重载时若已处于回合中途，transcript 只能拿到后半段，先不推流式，等最终完整结果
-  let suppressStreamingUntilTurnEnd = watcher?.startedMidTurn ?? false;
-  if (suppressStreamingUntilTurnEnd) {
-    log('outbound: 启动时回合未结束，本轮只发送最终完整结果');
+  // 中途重载时 transcript 只能拿到后半段：直接从当前进度开始推流，不再整轮静默
+  if (watcher?.startedMidTurn) {
+    log('outbound: 启动时回合未结束，将从当前进度开始推流');
   }
+
+  // 正文多源合并：agent 模式下 transcript 正文稀疏，chatSessions 的 response 可能更长
+  const mergedAnswer = (fallback: string): string => {
+    const sessionText = watcher?.latestAnswerText() ?? '';
+    return sessionText.length > (fallback || '').length ? sessionText : fallback;
+  };
 
   const cardTools = (config: ReturnType<typeof readConfig>, tools: string[]): string[] =>
     config.forwardTools ? tools : config.forwardProgress ? tools.slice(-3) : [];
@@ -350,9 +355,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     transcript.onSoftFinal = (event) => {
       const config = readConfig();
-      if (suppressStreamingUntilTurnEnd) {
-        return;
-      }
       stopHeartbeat(event.sessionId);
       lastContentActivityAt = Date.now();
       if (!config.forwardAssistant || !config.forwardStreaming) {
@@ -363,19 +365,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const state = activeStreams.get(event.sessionId);
+      const softAnswer = mergedAnswer(event.text);
       if (state) {
-        if (state.doneAt && normalize(state.softFinalText ?? '') === normalize(event.text ?? '')) {
+        if (state.doneAt && normalize(state.softFinalText ?? '') === normalize(softAnswer)) {
           return;
         }
-        state.softFinalText = event.text;
-        state.lastAnswerText = event.text;
+        state.softFinalText = softAnswer;
+        state.lastAnswerText = softAnswer;
         state.lastTools = event.tools;
       }
       const cards = buildStreamingCards({
         title: 'Copilot',
         thinking: config.forwardThinking ? event.thinking : '',
         tools: cardTools(config, event.tools),
-        answer: event.text || '（本轮没有文字输出）',
+        answer: softAnswer || '（本轮没有文字输出）',
         expanded: false,
         showThinking: config.forwardThinking,
         thinkingLimit: 6000,
@@ -461,9 +464,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     transcript.onDelta = (event) => {
       const config = readConfig();
-      if (suppressStreamingUntilTurnEnd) {
-        return;
-      }
       if (event.text.trim()) {
         stopHeartbeat(event.sessionId);
       }
@@ -487,7 +487,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const cards = buildStreamingCards({
             title: 'Copilot · 处理中…',
             thinking: config.forwardThinking ? event.thinking : '',
-            answer: event.text,
+            answer: mergedAnswer(event.text),
             tools: cardTools(config, event.tools),
             status: '正在输出…',
             expanded: false,
@@ -495,7 +495,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           });
           const existing = activeStreams.get(event.sessionId);
           if (existing) {
-            existing.lastAnswerText = event.text;
+            existing.lastAnswerText = mergedAnswer(event.text);
             existing.lastTools = event.tools;
           }
           if (existing?.messageId) {
@@ -513,7 +513,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (watcher) {
     watcher.onUser = (event) => {
       const config = readConfig();
-      suppressStreamingUntilTurnEnd = false;
       if (event.text.startsWith('[Terminal ')) {
         log('outbound: skip terminal notification user message');
         return;
@@ -586,14 +585,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const cards = buildStreamingCards({
             title: 'Copilot · 处理中…',
             thinking: config.forwardThinking ? event.thinking : '',
-            answer: event.text,
+            answer: mergedAnswer(event.text),
             tools: cardTools(config, event.tools),
             status: '正在输出…',
             expanded: false,
             showThinking: config.forwardThinking,
           });
           const state = await pushStreamCard(event.sessionId, chatId, cards);
-          state.lastAnswerText = event.text;
+          state.lastAnswerText = mergedAnswer(event.text);
           state.lastTools = event.tools;
           await queueStreamCard(state, cards);
         } catch (error) {
@@ -745,7 +744,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             state.patches += 1;
           }
           suppressDeltaUntil = Date.now() + 3000;
-          suppressStreamingUntilTurnEnd = false;
           clearStreamState();
           transcript?.reset();
         }

@@ -118,6 +118,22 @@ export class SessionWatcher {
     return !isRequestComplete(requests[requests.length - 1]);
   }
 
+  /** 最近一个非系统请求的正文（agent 模式下 transcript 正文稀疏，用它补充） */
+  latestAnswerText(): string {
+    const requests = this.state?.requests ?? [];
+    for (let i = requests.length - 1; i >= 0; i--) {
+      const request = requests[i];
+      if (requestText(request).startsWith('[Terminal ')) {
+        continue;
+      }
+      const text = extractText(request.response);
+      if (text) {
+        return text;
+      }
+    }
+    return '';
+  }
+
   getStatus(): WatcherStatus {
     return {
       sessionId: this.sessionId,

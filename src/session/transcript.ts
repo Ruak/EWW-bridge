@@ -43,6 +43,7 @@ export class TranscriptWatcher {
   private turnEndedAt = 0;
   private softFinalSent = false;
   private settledAt = 0;
+  private toolInFlightCount = 0;
 
   onDelta?: (event: StreamDelta) => void;
   onSoftFinal?: (event: StreamDelta) => void;
@@ -82,9 +83,14 @@ export class TranscriptWatcher {
     return this.sessionId;
   }
 
-  /** 本轮是否已真正落定（turn_end 后静默超过阈值），供结束判定使用 */
+  /** 本轮是否已真正落定（turn_end 后静默超过阈值），仅作辅助信号 */
   get settled(): boolean {
     return this.settledAt > 0;
+  }
+
+  /** 正在执行的工具数（tool.execution_start/complete 配对） */
+  get toolInFlight(): number {
+    return this.toolInFlightCount;
   }
 
   /** 回合结束后清空累计，下一轮重新开始 */
@@ -98,6 +104,7 @@ export class TranscriptWatcher {
     this.softFinalSent = false;
     this.settledAt = 0;
     this.active = false;
+    this.toolInFlightCount = 0;
   }
 
   private poll(): void {
@@ -232,6 +239,7 @@ export class TranscriptWatcher {
       this.turnEndedAt = 0;
       this.softFinalSent = false;
       this.settledAt = 0;
+      this.toolInFlightCount = 0;
       this.lastEventAt = Date.now();
       return;
     }
@@ -262,6 +270,12 @@ export class TranscriptWatcher {
       if (typeof data.toolName === 'string') {
         this.pushTool(data.toolName);
       }
+      this.toolInFlightCount += 1;
+      this.turnEndedAt = 0;
+      this.softFinalSent = false;
+      this.settledAt = 0;
+    } else if (type === 'tool.execution_complete') {
+      this.toolInFlightCount = Math.max(0, this.toolInFlightCount - 1);
       this.turnEndedAt = 0;
       this.softFinalSent = false;
       this.settledAt = 0;
