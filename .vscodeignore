@@ -1,0 +1,16 @@
+.vscode/**
+src/**
+test/**
+tools/**
+.github/**
+node_modules/@vscode/**
+node_modules/@types/**
+node_modules/typescript/**
+node_modules/.bin/**
+*.ts
+tsconfig.json
+.gitignore
+.vscodeignore
+.editorconfig
+**/*.map
+*.vsix

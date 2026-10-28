@@ -1,0 +1,10 @@
+node_modules/
+out/
+*.vsix
+*.log
+.vscode-test/
+.vscode/settings.json
+.DS_Store
+Thumbs.db
+coverage/
+temp/

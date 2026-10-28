@@ -1,0 +1,25 @@
+// 把需要的项复制到 VS Code 的用户或工作区 settings.json
+{
+  "ewwBridge.enabled": true,
+
+  // 飞书自建应用（App Secret 不写在这里，用命令写入密钥库）
+  "ewwBridge.feishu.appId": "cli_xxxxxxxxxxxxxxxx",
+  "ewwBridge.feishu.defaultChatId": "oc_xxxxxxxxxxxxxxxx",
+
+  // 安全：只允许自己 + 口令前缀（强烈建议都配）
+  "ewwBridge.security.allowedOpenIds": ["ou_xxxxxxxxxxxxxxxx"],
+  "ewwBridge.security.prefix": "#ai",
+
+  // 推送内容
+  "ewwBridge.forward.userMessages": true,
+  "ewwBridge.forward.assistantMessages": true,
+  "ewwBridge.forward.thinking": false,
+  "ewwBridge.forward.streaming": true,
+  "ewwBridge.forward.streamingIntervalMs": 500,
+  "ewwBridge.forward.progress": true,
+  "ewwBridge.forward.toolCalls": false,
+
+  // 注入方式：false = 追加到当前会话；true = 每条任务新开会话
+  "ewwBridge.inject.newChat": false,
+  "ewwBridge.inject.timeoutMs": 900000
+}
