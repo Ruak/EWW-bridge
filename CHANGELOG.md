@@ -2,6 +2,10 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.6
+
+- Diagnostics for the remaining latency: every ≥80 char text growth logs `transcript: 正文累计 Nch`, and every ≥80 char card update logs `outbound: 卡片正文 Nch 已发送`. The gap between the two lines is bridge latency; if a text line is missing, the delay is upstream (model/transcript)
+
 ## 1.0.5
 
 - **Bounded memory for huge session files**. Measured on a 313 MB `chatSessions` file: full parse took 38.5s and peaked at **2.6 GB** heap (~326 MB settled). Now:

@@ -44,6 +44,7 @@ export class TranscriptWatcher {
   private softFinalSent = false;
   private settledAt = 0;
   private toolInFlightCount = 0;
+  private lastLoggedTextLen = 0;
 
   onDelta?: (event: StreamDelta) => void;
   onSoftFinal?: (event: StreamDelta) => void;
@@ -240,6 +241,7 @@ export class TranscriptWatcher {
       this.softFinalSent = false;
       this.settledAt = 0;
       this.toolInFlightCount = 0;
+      this.lastLoggedTextLen = 0;
       this.lastEventAt = Date.now();
       return;
     }
@@ -339,6 +341,10 @@ export class TranscriptWatcher {
     this.lastEmitAt = now;
     this.dirty = false;
     this.emitCount += 1;
+    if (Math.abs(this.text.length - this.lastLoggedTextLen) >= 80) {
+      this.lastLoggedTextLen = this.text.length;
+      log(`transcript: 正文累计 ${this.text.length}ch（增量#${this.emitCount}）`);
+    }
     this.onDelta?.({
       sessionId: this.sessionId,
       thinking: this.thinking,

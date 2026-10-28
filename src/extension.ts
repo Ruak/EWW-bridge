@@ -133,6 +133,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     /** 最近一次收到的正文/工具，供心跳卡片复用，避免长回合无内容可推 */
     lastAnswerText?: string;
     lastTools?: string[];
+    /** 诊断：待发送正文长度 / 已发送正文长度 */
+    pendingTextLen?: number;
+    lastSentTextLen?: number;
   }
   const activeStreams = new Map<string, TurnStream>();
   const finalized = new Map<string, string>();
@@ -240,6 +243,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       state.patches += 1;
       state.lastRendered = cards.v2;
       state.lastPatchAt = Date.now();
+      if (state.pendingTextLen !== undefined && Math.abs(state.pendingTextLen - (state.lastSentTextLen ?? -1)) >= 80) {
+        state.lastSentTextLen = state.pendingTextLen;
+        log(`outbound: 卡片正文 ${state.pendingTextLen}ch 已发送（patch=${state.patches}）`);
+      }
       if (state.patches <= 3 || state.patches % 10 === 0) {
         log(`outbound: stream patch=${state.patches} (+${Date.now() - startedAt}ms, ${cards.v2.length}ch)`);
       }
@@ -373,6 +380,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         state.softFinalText = softAnswer;
         state.lastAnswerText = softAnswer;
         state.lastTools = event.tools;
+        state.pendingTextLen = softAnswer.length;
       }
       const cards = buildStreamingCards({
         title: 'Copilot',
@@ -497,6 +505,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (existing) {
             existing.lastAnswerText = mergedAnswer(event.text);
             existing.lastTools = event.tools;
+            existing.pendingTextLen = existing.lastAnswerText.length;
           }
           if (existing?.messageId) {
             await queueStreamCard(existing, cards);
@@ -594,6 +603,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const state = await pushStreamCard(event.sessionId, chatId, cards);
           state.lastAnswerText = mergedAnswer(event.text);
           state.lastTools = event.tools;
+          state.pendingTextLen = state.lastAnswerText.length;
           await queueStreamCard(state, cards);
         } catch (error) {
           logError('outbound partial failed', error);
