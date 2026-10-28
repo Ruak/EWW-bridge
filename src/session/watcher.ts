@@ -146,9 +146,18 @@ export class SessionWatcher {
     return 'unknown';
   }
 
-  /** 最近一个非系统请求的正文（agent 模式下 transcript 正文稀疏，用它补充） */
-  latestAnswerText(): string {
+  /**
+   * 指定回合的正文；不传 index 时只看最新的非系统请求（不再回退到更早的回合，避免新回合串上旧正文）
+   */
+  latestAnswerText(index?: number): string {
     const requests = this.state?.requests ?? [];
+    if (typeof index === 'number') {
+      const request = requests[index];
+      if (!request || requestText(request).startsWith('[Terminal ')) {
+        return '';
+      }
+      return extractText(request.response);
+    }
     for (let i = requests.length - 1; i >= 0; i--) {
       const request = requests[i];
       if (!request) {
@@ -157,10 +166,7 @@ export class SessionWatcher {
       if (requestText(request).startsWith('[Terminal ')) {
         continue;
       }
-      const text = extractText(request.response);
-      if (text) {
-        return text;
-      }
+      return extractText(request.response);
     }
     return '';
   }

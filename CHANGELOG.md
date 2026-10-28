@@ -2,6 +2,11 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.10
+
+- **新回合串上上一轮正文修复**：`latestAnswerText` 不再回退到更早的回合，`mergedAnswer` 必须传入当前回合下标；chatSessions 还没落盘新回合时只用 transcript 文本，卡片不会再渲染上一条回复
+- `watcher.onPartial` 增加回合下标校验，上一回合的迟到增量不再写进新卡片
+
 ## 1.0.9
 
 - **“上一轮已结束”误报修复**：注入后的结束判定不再依赖“60s 静默”，而是只看该请求的权威状态 —— `result` 出现 = 完成，`elapsedMs=0` 且无 `result` = 中断；静默仅在 5 分钟无任何动静时作兜底

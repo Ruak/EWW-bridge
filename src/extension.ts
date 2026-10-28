@@ -191,9 +191,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log('outbound: 启动时回合未结束，将从当前进度开始推流');
   }
 
-  // 正文多源合并：agent 模式下 transcript 正文稀疏，chatSessions 的 response 可能更长
-  const mergedAnswer = (fallback: string): string => {
-    const sessionText = watcher?.latestAnswerText() ?? '';
+  // 正文多源合并：只允许同一回合的 chatSessions 正文参与，避免新回合把上一轮的答复带出来
+  const mergedAnswer = (fallback: string, index?: number): string => {
+    const sessionText = watcher?.latestAnswerText(index) ?? '';
     return sessionText.length > (fallback || '').length ? sessionText : fallback;
   };
 
@@ -372,7 +372,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const state = activeStreams.get(event.sessionId);
-      const softAnswer = mergedAnswer(event.text);
+      const softAnswer = mergedAnswer(event.text, state?.requestIndex);
       if (state) {
         if (state.doneAt && normalize(state.softFinalText ?? '') === normalize(softAnswer)) {
           return;
@@ -480,20 +480,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       void (async () => {
         try {
+          const existing = activeStreams.get(event.sessionId);
+          const answer = mergedAnswer(event.text, existing?.requestIndex);
           const cards = buildStreamingCards({
             title: 'Copilot · 处理中…',
             thinking: config.forwardThinking ? event.thinking : '',
-            answer: mergedAnswer(event.text),
+            answer,
             tools: cardTools(config, event.tools),
             status: '正在输出…',
             expanded: false,
             showThinking: config.forwardThinking,
           });
-          const existing = activeStreams.get(event.sessionId);
           if (existing) {
-            existing.lastAnswerText = mergedAnswer(event.text);
+            existing.lastAnswerText = answer;
             existing.lastTools = event.tools;
-            existing.pendingTextLen = existing.lastAnswerText.length;
+            existing.pendingTextLen = answer.length;
           }
           if (existing?.messageId) {
             await queueStreamCard(existing, cards);
@@ -575,6 +576,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!config.forwardAssistant || !config.forwardStreaming) {
         return;
       }
+      const existing = activeStreams.get(event.sessionId);
+      if (existing?.requestIndex !== undefined && existing.requestIndex !== event.index) {
+        log(`outbound: 跳过上一回合的增量 #${event.index}（卡片属于 #${existing.requestIndex}）`);
+        return;
+      }
       lastContentActivityAt = Date.now();
       if (activeStreams.get(event.sessionId)?.doneAt) {
         return;
@@ -588,19 +594,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       void (async () => {
         try {
+          const answer = mergedAnswer(event.text, event.index);
           const cards = buildStreamingCards({
             title: 'Copilot · 处理中…',
             thinking: config.forwardThinking ? event.thinking : '',
-            answer: mergedAnswer(event.text),
+            answer,
             tools: cardTools(config, event.tools),
             status: '正在输出…',
             expanded: false,
             showThinking: config.forwardThinking,
           });
           const state = await pushStreamCard(event.sessionId, chatId, cards);
-          state.lastAnswerText = mergedAnswer(event.text);
+          state.requestIndex = event.index;
+          state.lastAnswerText = answer;
           state.lastTools = event.tools;
-          state.pendingTextLen = state.lastAnswerText.length;
+          state.pendingTextLen = answer.length;
           await queueStreamCard(state, cards);
         } catch (error) {
           logError('outbound partial failed', error);
