@@ -2,6 +2,14 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.13
+
+- **VS Code 侧消息被截断的真因修复**：注入器旧逻辑在“当前回合仍在跑”时就提交（`waitUntilIdle` 60s 超时后强行投递，或 transcript 静默 8s 就以为空闲），而 `chat.open` 提交会打断 VS Code 正在输出的回合 —— 被中断的答复落盘后就是残段，重载窗口后只能看到这一部分
+  - 新增 `TranscriptWatcher.isTurnRunning()`（`turn_start`/`user.message` 未闭合，或 `tool.execution_inflight>0`，长终端命令也计入）
+  - 注入前必须同时满足：无在途回合、无在途工具、静默 ≥ 2s（transcript 静默 >30s 时不再理会 chatSessions 的滞后 `isBusy`）；未空闲则**继续排队**，绝不强行提交
+- **结束判定改用实时源**：`waitForTurnEnd` 以 transcript（turn 闭合 + 无在途工具 + 静默 3s）为主，chatSessions 的 `result` 只作辅证，不再“要等超时才知道结束”
+- **重载不再掉正文**：卡片状态额外持久化已渲染正文（≤12k 字符）与已渲染长度；恢复后任何更短的残段都会被丢弃（`跳过回退帧`），并回写 workspaceState
+
 ## 1.0.12
 
 - **多实例单写者锁**：同一台机器多个窗口都装了本扩展时，只允许一个实例镜像/推送（globalStorage 锁 + 5s 心跳 + pid 存活检查）；其余窗口进入被动模式，状态栏显示“飞书(已接管)”

@@ -154,6 +154,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // ---------------- 出站：会话 -> 飞书（实时流式） ----------------
   interface TurnStream {
+    sessionId: string;
     chatId: string;
     messageId?: string;
     creating?: Promise<string | undefined>;
@@ -177,23 +178,58 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     /** 诊断：待发送正文长度 / 已发送正文长度 */
     pendingTextLen?: number;
     lastSentTextLen?: number;
+    /** 卡片上已经渲染过的正文长度：重载恢复后不允许被更短残段覆盖 */
+    answerFloorLen?: number;
+    /** 正文持久化节流：上次写入时间 / 上次写入长度 */
+    lastTextPersist?: number;
+    persistedTextLen?: number;
   }
   const activeStreams = new Map<string, TurnStream>();
   const finalized = new Map<string, string>();
   const STREAM_STATE_KEY = 'ewwBridge.streamCard';
-  const saveStreamState = (sessionId: string, messageId: string, requestIndex?: number): void => {
-    void context.workspaceState.update(STREAM_STATE_KEY, { sessionId, messageId, requestIndex, updatedAt: Date.now() });
+  /** 卡片正文最多持久化这么多字符（与卡片 answerLimit 一致） */
+  const PERSIST_TEXT_MAX = 12000;
+  interface PersistedStream {
+    sessionId: string;
+    messageId: string;
+    requestIndex?: number;
+    answerLen?: number;
+    answerText?: string;
+  }
+  const saveStreamState = (
+    sessionId: string,
+    messageId: string,
+    requestIndex?: number,
+    answerText?: string,
+  ): void => {
+    const text = answerText ? answerText.slice(0, PERSIST_TEXT_MAX) : undefined;
+    void context.workspaceState.update(STREAM_STATE_KEY, {
+      sessionId,
+      messageId,
+      requestIndex,
+      answerLen: text ? text.length : undefined,
+      answerText: text,
+      updatedAt: Date.now(),
+    });
   };
+  /** 同一回合内取更长的一份，避免旧快照/迟到的短文本把卡片改短 */
+  const pickLonger = (a: string, b: string): string => ((a || '').length >= (b || '').length ? a : b);
   const clearStreamState = (): void => {
     void context.workspaceState.update(STREAM_STATE_KEY, undefined);
   };
   // 重载时恢复未完成的流式卡片，避免另开一张卡导致"内容被截断"
   let pendingReplayIndex: number | undefined;
-  const restored = context.workspaceState.get<{ sessionId: string; messageId: string; requestIndex?: number }>(STREAM_STATE_KEY);
+  const restored = context.workspaceState.get<PersistedStream>(STREAM_STATE_KEY);
+  if (restored && watcher?.getStatus().sessionId !== restored.sessionId) {
+    log(
+      `outbound: 跳过卡片恢复（会话不匹配 ${restored.sessionId.slice(0, 8)} vs ${watcher?.getStatus().sessionId.slice(0, 8) || '-'}）`,
+    );
+  }
   if (restored && watcher?.getStatus().sessionId === restored.sessionId) {
     if (watcher?.startedMidTurn) {
       activeStreams.set(restored.sessionId, {
         chatId: targetChatId() || '',
+        sessionId: restored.sessionId,
         messageId: restored.messageId,
         createFailures: 0,
         patches: 1,
@@ -201,8 +237,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         lastPatchAt: Date.now(),
         turnStartedAt: 0,
         requestIndex: restored.requestIndex,
+        lastAnswerText: restored.answerText,
+        pendingTextLen: restored.answerLen,
+        answerFloorLen: restored.answerLen,
       });
-      log(`outbound: 恢复上次的流式卡片 ${restored.messageId} (request #${restored.requestIndex ?? '?'})`);
+      log(
+        `outbound: 恢复上次的流式卡片 ${restored.messageId} (request #${restored.requestIndex ?? '?'}, 已渲染 ${restored.answerLen ?? 0}ch)`,
+      );
     } else {
       // 回合可能刚好在重载前结束，但上次实例没来得及定稿：重放最后一条结果补全同一张卡
       const status = watcher?.getStatus();
@@ -210,6 +251,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         const lastIndex = status.requests - 1;
         activeStreams.set(restored.sessionId, {
           chatId: targetChatId() || '',
+          sessionId: restored.sessionId,
           messageId: restored.messageId,
           createFailures: 0,
           patches: 1,
@@ -217,6 +259,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           lastPatchAt: Date.now(),
           turnStartedAt: 0,
           requestIndex: lastIndex,
+          lastAnswerText: restored.answerText,
+          pendingTextLen: restored.answerLen,
+          answerFloorLen: restored.answerLen,
         });
         pendingReplayIndex = lastIndex;
         log(`outbound: 回合已结束，稍后重放 #${lastIndex} 补全上次卡片`);
@@ -238,13 +283,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return sessionText.length > (fallback || '').length ? sessionText : fallback;
   };
 
+  /**
+   * 回退守卫：重载后 transcript 只能拿到后半段、chatSessions 也可能只落盘了一部分，
+   * 任何比“卡片上已渲染的长度”短很多的帧一律丢弃（否则用户会看到正文变短/丢一段）。
+   */
+  const regressedAnswer = (state: TurnStream | undefined, answer: string, allowShrink = false): boolean => {
+    if (!state || allowShrink) {
+      return false;
+    }
+    const floor = state.answerFloorLen ?? 0;
+    if (floor <= 0) {
+      return false;
+    }
+    const len = normalize(answer).length;
+    if (len + 40 < floor * 0.98) {
+      log(`outbound: 跳过回退帧（${len}ch < 已渲染 ${floor}ch）`);
+      return true;
+    }
+    return false;
+  };
+
   const cardTools = (config: ReturnType<typeof readConfig>, tools: string[]): string[] =>
     config.forwardTools ? tools : config.forwardProgress ? tools.slice(-3) : [];
 
   const pushStreamCard = async (sessionId: string, chatId: string, cards: CardPair): Promise<TurnStream> => {
     let state = activeStreams.get(sessionId);
     if (!state) {
-      state = { chatId, createFailures: 0, patches: 0, lastRendered: '', lastPatchAt: Date.now(), turnStartedAt: 0 };
+      state = { sessionId, chatId, createFailures: 0, patches: 0, lastRendered: '', lastPatchAt: Date.now(), turnStartedAt: 0 };
       activeStreams.set(sessionId, state);
       log(`outbound: stream card for ${sessionId.slice(0, 8)}`);
     }
@@ -284,6 +349,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       state.patches += 1;
       state.lastRendered = cards.v2;
       state.lastPatchAt = Date.now();
+      if (state.pendingTextLen !== undefined && state.pendingTextLen > (state.answerFloorLen ?? 0)) {
+        state.answerFloorLen = state.pendingTextLen;
+        const text = state.lastAnswerText ?? '';
+        const grew = text.length - (state.persistedTextLen ?? 0) >= 1000;
+        if (grew || Date.now() - (state.lastTextPersist ?? 0) > 5000) {
+          state.lastTextPersist = Date.now();
+          state.persistedTextLen = text.length;
+          saveStreamState(state.sessionId, state.messageId, state.requestIndex, text);
+        }
+      }
       if (state.pendingTextLen !== undefined && Math.abs(state.pendingTextLen - (state.lastSentTextLen ?? -1)) >= 80) {
         state.lastSentTextLen = state.pendingTextLen;
         log(`outbound: 卡片正文 ${state.pendingTextLen}ch 已发送（patch=${state.patches}）`);
@@ -353,10 +428,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const status = top
         ? `正在执行 ${top.name}${top.detail ? `：${top.detail}` : ''}（已 ${runningFor}s）`
         : `进行中…（已等待 ${secs}s）`;
+      const heartbeatAnswer = state.lastAnswerText ?? '';
+      if (regressedAnswer(state, heartbeatAnswer)) {
+        // 已渲染正文比当前快照长（常见于重载后只拿到后半段）：不回退，等更长文本
+        return;
+      }
       const cards = buildStreamingCards({
         title: state.softFinalText ? 'Copilot' : 'Copilot · 处理中…',
         tools: state.lastTools ?? [],
-        answer: state.lastAnswerText ?? '',
+        answer: heartbeatAnswer,
         status,
         expanded: false,
         showThinking: false,
@@ -429,7 +509,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const state = activeStreams.get(event.sessionId);
-      const softAnswer = mergedAnswer(event.text, state?.requestIndex);
+      const softAnswer = pickLonger(mergedAnswer(event.text, state?.requestIndex), state?.lastAnswerText ?? '');
+      if (regressedAnswer(state, softAnswer)) {
+        return;
+      }
       if (state) {
         if (state.doneAt && normalize(state.softFinalText ?? '') === normalize(softAnswer)) {
           return;
@@ -482,6 +565,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // 直接释放状态，保留上一轮卡片原样（不再用状态卡覆盖长回答）
         stopHeartbeat(event.sessionId);
         activeStreams.delete(event.sessionId);
+      } else if (previous) {
+        // 占位卡延续，但新回合不能带上一轮的任何正文快照
+        previous.lastAnswerText = undefined;
+        previous.softFinalText = undefined;
+        previous.answerFloorLen = 0;
+        previous.pendingTextLen = 0;
+        previous.lastSentTextLen = undefined;
+        previous.persistedTextLen = 0;
       }
       // transcript 只知“何时看到提问”，chatSessions 的 request.timestamp 才是回合起点：同一个回合内取较早值
       const now = Date.now();
@@ -542,7 +633,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void (async () => {
         try {
           const existing = activeStreams.get(event.sessionId);
-          const answer = mergedAnswer(event.text, existing?.requestIndex);
+          const answer = pickLonger(mergedAnswer(event.text, existing?.requestIndex), existing?.lastAnswerText ?? '');
+          if (regressedAnswer(existing, answer)) {
+            return;
+          }
           const cards = buildStreamingCards({
             title: 'Copilot · 处理中…',
             thinking: config.forwardThinking ? event.thinking : '',
@@ -579,10 +673,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!state?.messageId || state.doneAt) {
         return;
       }
+      const toolAnswer = state.lastAnswerText ?? '';
+      if (regressedAnswer(state, toolAnswer)) {
+        // 已渲染的正文比当前快照长：不回退，只保留心跳
+        return;
+      }
       const cards = buildStreamingCards({
         title: state.softFinalText ? 'Copilot' : 'Copilot · 处理中…',
         tools: state.lastTools ?? [],
-        answer: state.lastAnswerText ?? '',
+        answer: toolAnswer,
         status: activity
           ? `正在执行 ${activity.name}${activity.detail ? `：${activity.detail}` : ''}`
           : '工具执行完成，处理中…',
@@ -628,12 +727,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
       }
       if (stream) {
+        if (stream.requestIndex !== event.index) {
+          // 新回合：清空旧正文与已渲染基线
+          stream.lastAnswerText = undefined;
+          stream.softFinalText = undefined;
+          stream.answerFloorLen = 0;
+          stream.pendingTextLen = 0;
+          stream.lastSentTextLen = undefined;
+          stream.persistedTextLen = 0;
+        }
         stream.requestIndex = event.index;
         if (!stream.turnStartedAt) {
           stream.turnStartedAt = event.timestamp || Date.now();
         }
         if (stream.messageId) {
-          saveStreamState(event.sessionId, stream.messageId, stream.requestIndex);
+          saveStreamState(event.sessionId, stream.messageId, stream.requestIndex, stream.lastAnswerText);
         }
       }
       const chatId = targetChatId();
@@ -701,7 +809,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       void (async () => {
         try {
-          const answer = mergedAnswer(event.text, event.index);
+          const current = activeStreams.get(event.sessionId);
+          const answer = pickLonger(mergedAnswer(event.text, event.index), current?.lastAnswerText ?? '');
+          if (regressedAnswer(current, answer)) {
+            return;
+          }
           const cards = buildStreamingCards({
             title: 'Copilot · 处理中…',
             thinking: config.forwardThinking ? event.thinking : '',
@@ -749,6 +861,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const answerText = waitingMore
         ? ''
         : effectiveText || (aborted ? '（本轮在 VS Code 侧被中断，未产生文字输出）' : '（本轮没有文字输出）');
+      if (!waitingMore && regressedAnswer(state, answerText, aborted)) {
+        // 终稿比卡片上已有的正文短：保留已有正文（重载后最容易出现）
+        if (state) {
+          state.doneAt = Date.now();
+        }
+        return;
+      }
       const chunks = splitMarkdown(answerText);
       const firstChunk = chunks.shift() ?? '';
       const cards = buildStreamingCards({
@@ -797,6 +916,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!state && staleByTime) {
         log(`outbound: 丢弃无主迟到结果 #${event.index}`);
         return;
+      }
+      if (state && !waitingMore) {
+        state.pendingTextLen = answerText.length;
       }
       if (state && state.requestIndex === undefined) {
         state.requestIndex = event.index;

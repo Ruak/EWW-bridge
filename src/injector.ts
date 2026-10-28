@@ -68,9 +68,15 @@ export class Injector {
       return;
     }
     this.running = true;
+    let keepQueued = false;
     try {
-      // 上一轮没真正结束时 VS Code 会把新消息排队，注入会“迟到”：宁可多等，也不要重复投递
-      await this.waitUntilIdle(60000);
+      // 上一轮没真正结束时绝不能投：提交会在 VS Code 侧打断正在输出的回合，重载后就只剩残段
+      const idle = await this.waitUntilIdle(task.timeoutMs);
+      if (!idle) {
+        keepQueued = true;
+        log('inject: 回合仍在运行，任务继续排队（不打断当前输出）');
+        return;
+      }
       const config = readConfig();
       const assistantBefore = this.watcher?.assistantMessages ?? 0;
       if (config.newChat) {
@@ -114,9 +120,13 @@ export class Injector {
       logError('inject failed', error);
       task.onDeliveryFailed?.();
     } finally {
-      this.queue.shift();
       this.running = false;
-      setTimeout(() => void this.pump(), 250);
+      if (keepQueued) {
+        setTimeout(() => void this.pump(), 5000);
+      } else {
+        this.queue.shift();
+        setTimeout(() => void this.pump(), 250);
+      }
     }
   }
 
@@ -170,24 +180,29 @@ export class Injector {
     }
   }
 
-  private async waitUntilIdle(maxMs: number): Promise<void> {
+  private async waitUntilIdle(maxMs: number): Promise<boolean> {
     const deadline = Date.now() + maxMs;
+    let lastLogAt = 0;
     while (Date.now() < deadline) {
       const watcherBusy = this.watcher?.isBusy() ?? false;
-      if (!this.transcript) {
-        if (!watcherBusy) {
-          return;
-        }
-        await delay(300);
-        continue;
+      const transcriptBusy = this.transcript?.isTurnRunning() ?? false;
+      const quiet = this.transcript?.quietMs ?? Number.MAX_SAFE_INTEGER;
+      // 判定依次收紧：chatSessions 落盘滞后，以 transcript 的 turn_start/turn_end + 在途工具为准；
+      // transcript 长静默（>30s）时不再理会 chatSessions 的 isBusy（它可能只是没落盘）
+      if (!transcriptBusy && quiet > 2000 && (!watcherBusy || quiet > 30000)) {
+        return true;
       }
-      // 以 transcript 的静默程度为准（chatSessions 落盘滞后，isBusy 不可靠）
-      const quietFor = Date.now() - this.transcript.lastActivity;
-      if (!watcherBusy || quietFor > 8000) {
-        return;
+      if (Date.now() - lastLogAt > 15000) {
+        lastLogAt = Date.now();
+        log(
+          `inject: 等待回合结束（chatSessions 忙=${watcherBusy}，transcript 运行中=${transcriptBusy}，静默 ${Math.round(
+            Math.min(quiet, 999999) / 1000,
+          )}s）`,
+        );
       }
       await delay(300);
     }
+    return false;
   }
 
   /** 注入后确认真的开始了新回合：chatSessions 新请求 或 transcript 出现新事件 */
@@ -240,45 +255,40 @@ export class Injector {
     requestsBefore: number,
     timeoutMs: number,
   ): Promise<'completed' | 'ended' | 'timeout'> {
-    if (!this.watcher) {
+    if (!this.watcher && !this.transcript) {
       return 'completed';
     }
     const startedAt = Date.now();
     const deadline = startedAt + timeoutMs;
+    let sawActivity = false;
     while (Date.now() < deadline) {
-      if (this.watcher.assistantMessages > assistantCountBefore) {
+      if (this.watcher && this.watcher.assistantMessages > assistantCountBefore) {
         return 'completed';
       }
-      const status = this.watcher.getStatus();
-      if (status.requests > requestsBefore) {
+      const status = this.watcher?.getStatus();
+      if (this.watcher && status && status.requests > requestsBefore) {
         const latest = this.watcher.latestStatus();
-        if (latest === 'completed') {
-          return 'completed';
-        }
         if (latest === 'aborted') {
           return 'ended';
         }
-      }
-      if (this.transcript) {
-        const quietFor = Date.now() - this.transcript.lastActivity;
-        const settledNow =
-          this.transcript.settledAtMs > startedAt &&
-          this.transcript.toolInFlight === 0 &&
-          quietFor > 1500 &&
-          this.transcript.currentSessionId !== '';
-        if (settledNow) {
-          log(`inject: transcript 已落定（静默 ${Math.round(quietFor / 1000)}s），本轮结束`);
+        if (latest === 'completed') {
           return 'completed';
         }
       }
-      // 兜底：新请求长时间无任何动静（5 分钟）才判结束，避免误伤长任务
-      const quietIdle = Date.now() - (this.transcript?.lastActivity ?? startedAt);
-      const toolBusy = this.transcript?.toolInFlight ?? 0;
-      if (!this.watcher.isBusy() && quietIdle > 300000 && toolBusy === 0) {
+      if (this.transcript) {
+        if (this.transcript.lastActivity >= startedAt || this.transcript.settledAtMs >= startedAt) {
+          sawActivity = true;
+        }
+        // transcript 是实时源：turn 闭合 + 无在途工具 + 静默 3s 就是真结束，不必等 chatSessions 的 result
+        if (sawActivity && !this.transcript.isTurnRunning() && this.transcript.quietMs > 3000) {
+          log(`inject: transcript 已落定（静默 ${Math.round(this.transcript.quietMs / 1000)}s），本轮结束`);
+          return 'completed';
+        }
+      } else if (status && !status.busy && Date.now() - startedAt > 300000) {
         log('inject: 新请求 5 分钟无任何动静，判定为已结束');
         return 'ended';
       }
-      await delay(500);
+      await delay(300);
     }
     return 'timeout';
   }

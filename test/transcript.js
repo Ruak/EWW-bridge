@@ -78,6 +78,9 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   if (!second.tools.includes('run_in_terminal')) {
     throw new Error('工具执行事件未累计');
   }
+  if (!watcher.isTurnRunning()) {
+    throw new Error('有在途工具时必须判定为回合运行中（注入不能提交）');
+  }
   if (!second.text.includes('开始分析')) {
     throw new Error('累计正文丢失');
   }
@@ -98,6 +101,9 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   }
   if (!softFinals[0].text.includes('开始分析')) {
     throw new Error('软结束未携带累计内容');
+  }
+  if (watcher.isTurnRunning()) {
+    throw new Error('turn_end 且无在途工具时应判定为回合已结束');
   }
 
   // 2.6) 用户消息事件（transcript 也会记录）

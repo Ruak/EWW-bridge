@@ -50,6 +50,8 @@ export class TranscriptWatcher {
   private turnEndedAt = 0;
   private softFinalSent = false;
   private settledAt = 0;
+  /** 已看到 turn_start/user.message，但还没等到 turn_end */
+  private turnOpen = false;
   private toolInFlightCount = 0;
   private toolStarts = new Map<string, ToolActivity>();
   private lastLoggedTextLen = 0;
@@ -114,6 +116,19 @@ export class TranscriptWatcher {
     return this.toolInFlightCount;
   }
 
+  /**
+   * 回合是否仍在运行：模型步未 turn_end（含长思考）或有在途工具（含长终端命令）。
+   * 注入前必须用它判定，绝不能在为 true 时提交，否则会打断 VS Code 正在输出的消息。
+   */
+  isTurnRunning(): boolean {
+    return this.turnOpen || this.toolInFlightCount > 0;
+  }
+
+  /** 距离最近一条 transcript 事件的静默毫秒数 */
+  get quietMs(): number {
+    return this.lastEventAt ? Date.now() - this.lastEventAt : Number.MAX_SAFE_INTEGER;
+  }
+
   /** 回合结束后清空累计，下一轮重新开始 */
   reset(): void {
     this.thinking = '';
@@ -127,6 +142,7 @@ export class TranscriptWatcher {
     this.active = false;
     this.toolInFlightCount = 0;
     this.toolStarts.clear();
+    this.turnOpen = false;
   }
 
   private poll(): void {
@@ -241,6 +257,7 @@ export class TranscriptWatcher {
       const content = typeof data.content === 'string' ? data.content.trim() : '';
       // 后台终端通知（[Terminal ...]）是 VS Code 注入的 steering 消息：同一回合继续，不能当新提问处理
       if (content.startsWith('[Terminal ')) {
+        this.turnOpen = true;
         this.lastEventAt = Date.now();
         return;
       }
@@ -264,11 +281,13 @@ export class TranscriptWatcher {
       this.toolInFlightCount = 0;
       this.toolStarts.clear();
       this.lastLoggedTextLen = 0;
+      this.turnOpen = true;
       this.lastEventAt = Date.now();
       return;
     }
     if (type === 'assistant.turn_start') {
       this.active = true;
+      this.turnOpen = true;
       this.settledAt = 0;
       return;
     }
@@ -327,6 +346,7 @@ export class TranscriptWatcher {
     } else if (type === 'assistant.turn_end') {
       // 每条模型消息结束都会触发；若后续没有工具/新消息，则视为回合结束
       this.turnEndedAt = Date.now();
+      this.turnOpen = false;
     } else {
       return;
     }
