@@ -302,10 +302,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return tail.text;
   };
 
+  /** 两段正文是否属于同一个回答（前缀相同）：用于拒绝补丁流里旧回合的迟到正文 */
+  const sameStory = (current: string, candidate: string): boolean => {
+    const a = normalize(current);
+    const b = normalize(candidate);
+    if (!a || !b) {
+      return true;
+    }
+    const probe = a.slice(0, 24);
+    return b.startsWith(probe) || a.startsWith(b.slice(0, 24));
+  };
+
   const mergedAnswer = (fallback: string, index?: number): string => {
     if (watcher?.partialState) {
       // 残缺尾部下标不可信，改用补丁流实时正文（chatSessions 比 transcript 更早落盘）
-      return pickLonger(fallback || '', turnTailText(watcher.getStatus().sessionId));
+      const tail = turnTailText(watcher.getStatus().sessionId);
+      if (tail && sameStory(fallback || '', tail)) {
+        return pickLonger(fallback || '', tail);
+      }
+      return fallback;
     }
     const sessionText = watcher?.latestAnswerText(index) ?? '';
     return sessionText.length > (fallback || '').length ? sessionText : fallback;
@@ -456,8 +471,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       // VS Code 偶尔不写 turn_end：事件停了且无在途工具时主动收尾，否则卡片会永远停在“处理中”
-      // 但后台命令还在跑时不能收尾（那是在等命令结束后的唤醒）
-      if (!top && !terminalWatch.hasRecent() && transcript?.cardSettled && state.messageId) {
+      // 但后台命令还在跑、或一句话正文都没有（还在思考）时不能收尾
+      const settledAnswer = (state.lastAnswerText ?? '').trim();
+      if (!top && !terminalWatch.hasRecent() && transcript?.cardSettled && state.messageId && settledAnswer.length > 0) {
         void finalizeSettledCard(state);
         return;
       }
@@ -599,7 +615,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const state = activeStreams.get(event.sessionId);
-      const softAnswer = pickLonger(mergedAnswer(event.text, state?.requestIndex), state?.lastAnswerText ?? '');
+      const softAnswer0 = mergedAnswer(event.text, state?.requestIndex);
+      if (!softAnswer0.trim()) {
+        // 只有思考/工具、还没正文：保持“处理中”，不要把卡片收尾成“没有文字输出”
+        return;
+      }
+      const softAnswer = pickLonger(softAnswer0, state?.lastAnswerText ?? '');
       if (regressedAnswer(state, softAnswer)) {
         return;
       }
@@ -823,7 +844,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!state?.messageId || state.doneAt) {
         return;
       }
+      // transcript 正活跃时以它为准，避免两个源互相抢写造成闪烁
+      if (transcript && Date.now() - transcript.lastActivity < 5000) {
+        return;
+      }
       const answer = pickLonger(event.text, state.lastAnswerText ?? '');
+      if (!sameStory(state.lastAnswerText ?? '', answer)) {
+        log('outbound: 补丁流正文与当前卡片不同源，忽略（可能是旧回合迟到落盘）');
+        return;
+      }
       if (regressedAnswer(state, answer)) {
         return;
       }

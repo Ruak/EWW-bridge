@@ -46,8 +46,8 @@ export class TranscriptWatcher {
   partialIntervalMs = 500;
   /** turn_end 后静默多久视为回合结束（毫秒） */
   softFinalIdleMs = 800;
-  /** 没有 turn_end 时的静默兜底阈值（VS Code 偶尔漏写 turn_end） */
-  stallIdleMs = 5000;
+  /** 没有 turn_end 时的静默兜底阈值（VS Code 偶尔漏写 turn_end）；必须足够长，否则思考期就会误收尾 */
+  stallIdleMs = 120000;
 
   private turnEndedAt = 0;
   private softFinalSent = false;
@@ -450,6 +450,10 @@ export class TranscriptWatcher {
         return;
       }
     } else if (this.toolInFlightCount > 0 || this.quietMs < this.stallIdleMs) {
+      return;
+    }
+    // 没有  turn_end 且一句话正文都没有：不要发软结束（否则卡片会显示“本轮没有文字输出”）
+    if (!this.turnEndedAt && !this.text.trim()) {
       return;
     }
     this.settledAt = Date.now();
