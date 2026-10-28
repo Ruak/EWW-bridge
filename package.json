@@ -8,11 +8,11 @@
   "icon": "assets/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Ruak/EWW"
+    "url": "https://github.com/Ruak/EWW-bridge"
   },
-  "homepage": "https://github.com/Ruak/EWW#readme",
+  "homepage": "https://github.com/Ruak/EWW-bridge#readme",
   "bugs": {
-    "url": "https://github.com/Ruak/EWW/issues"
+    "url": "https://github.com/Ruak/EWW-bridge/issues"
   },
   "keywords": [
     "copilot",
