@@ -819,7 +819,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       text,
       timeoutMs: config.injectTimeoutMs,
       onInjected: () => {
-        void reply('已提交到 VS Code 当前会话。');
+        const busyNow = (watcher?.isBusy() ?? false) || (transcript ? Date.now() - transcript.lastActivity < 8000 : false);
+        void reply(busyNow ? '已排队：当前回合还在运行，结束后会自动执行本条。' : '已提交到 VS Code 当前会话。');
         if (config.forwardAssistant && config.forwardStreaming && feishu?.started) {
           const streamChatId = targetChatId();
           const sessionId = watcher?.getStatus().sessionId;

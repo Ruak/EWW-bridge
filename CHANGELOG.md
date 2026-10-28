@@ -2,6 +2,11 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.1
+
+- **Logging no longer dies after re-activation**: file logging is written before the output channel and output-channel errors are swallowed (a disposed channel could silently kill all logging)
+- Inbound replies now say **已排队：当前回合还在运行** when the target window is busy, instead of always claiming it was submitted
+
 ## 1.0.0
 
 First public release on the VS Code Marketplace.

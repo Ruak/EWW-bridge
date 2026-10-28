@@ -22,10 +22,15 @@ function appendFile(line: string): void {
 }
 
 export function initLog(): vscode.OutputChannel {
-  if (!channel) {
-    channel = vscode.window.createOutputChannel('EWW Bridge');
+  try {
+    if (!channel) {
+      channel = vscode.window.createOutputChannel('EWW Bridge');
+    }
+    return channel;
+  } catch {
+    // 输出通道可能已被释放（扩展重新激活）：退化为空实现，保证日志落盘不受影响
+    return { appendLine: () => undefined, show: () => undefined, dispose: () => undefined } as unknown as vscode.OutputChannel;
   }
-  return channel;
 }
 
 function stringify(value: unknown): string {
@@ -42,8 +47,13 @@ function stringify(value: unknown): string {
 export function log(message: string, ...args: unknown[]): void {
   const suffix = args.length ? ' ' + args.map(stringify).join(' ') : '';
   const line = `[${new Date().toLocaleTimeString()}] ${message}${suffix}`;
-  initLog().appendLine(line);
+  // 先落盘：通道写入可能因为被释放而抛错，不能阻断文件日志
   appendFile(line);
+  try {
+    initLog().appendLine(line);
+  } catch {
+    /* 忽略通道异常 */
+  }
 }
 
 export function logError(message: string, error: unknown): void {
