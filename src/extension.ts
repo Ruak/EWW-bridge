@@ -14,6 +14,7 @@ import { acquireOwnership } from './instance';
 import { initLog, log, logError, setInstanceTag } from './log';
 import { createTranscriptWatcher, createWatcher } from './session/store';
 import { SessionWatcher } from './session/watcher';
+import { TerminalWatch } from './session/terminalWatch';
 import { TranscriptWatcher } from './session/transcript';
 
 let watcher: SessionWatcher | undefined;
@@ -89,9 +90,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     transcript.partialIntervalMs = readConfig().streamingIntervalMs;
   }
 
+  // 后台终端：等待期间 transcript/chatSessions 完全不落盘，只能靠 shell 执行事件做状态提示
+  const terminalWatch = new TerminalWatch();
+  terminalWatch.start();
+  context.subscriptions.push({ dispose: () => terminalWatch.dispose() });
+
   // 卡片出现真实内容/工具进展的时间，作为“注入已生效”的确认信号（占位心跳不算）
   let lastContentActivityAt = 0;
-  const injector = new Injector(watcher, transcript, () => lastContentActivityAt);
+  const injector = new Injector(watcher, transcript, () => lastContentActivityAt, terminalWatch);
   let lastChatId: string = context.globalState.get<string>(STATE_LAST_CHAT_ID, '') || '';
 
   const echoQueue: { text: string; at: number }[] = [];
@@ -208,7 +214,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       sessionId,
       messageId,
       requestIndex,
-      answerLen: text ? text.length : undefined,
+      // 与回退守卫保持同一口径（去空白后的长度）
+      answerLen: text ? normalize(text).length : undefined,
       answerText: text,
       updatedAt: Date.now(),
     });
@@ -354,8 +361,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       state.patches += 1;
       state.lastRendered = cards.v2;
       state.lastPatchAt = Date.now();
-      if (state.pendingTextLen !== undefined && state.pendingTextLen > (state.answerFloorLen ?? 0)) {
-        state.answerFloorLen = state.pendingTextLen;
+      if (state.pendingTextLen !== undefined) {
+        // 注意：回退守卫与 floor 都用“去空白后的长度”，不能拿原始长度当基准
+        const normLen = normalize(state.lastAnswerText ?? '').length;
+        if (normLen > (state.answerFloorLen ?? 0)) {
+          state.answerFloorLen = normLen;
+        }
         const text = state.lastAnswerText ?? '';
         const grew = text.length - (state.persistedTextLen ?? 0) >= 1000;
         if (grew || Date.now() - (state.lastTextPersist ?? 0) > 5000) {
@@ -429,15 +440,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       // VS Code 偶尔不写 turn_end：事件停了且无在途工具时主动收尾，否则卡片会永远停在“处理中”
-      if (!top && transcript?.cardSettled && state.messageId) {
+      // 但后台命令还在跑时不能收尾（那是在等命令结束后的唤醒）
+      if (!top && !terminalWatch.hasRecent() && transcript?.cardSettled && state.messageId) {
         void finalizeSettledCard(state);
         return;
       }
       const secs = Math.max(1, Math.round((Date.now() - since) / 1000));
       const runningFor = top ? Math.max(1, Math.round((Date.now() - top.startedAt) / 1000)) : 0;
-      const status = top
-        ? `正在执行 ${top.name}${top.detail ? `：${top.detail}` : ''}（已 ${runningFor}s）`
-        : `进行中…（已等待 ${secs}s）`;
+      const shell = terminalWatch.current();
+      const shellFor = shell ? Math.max(1, Math.round((Date.now() - shell.startedAt) / 1000)) : 0;
+      const status = shell
+        ? `后台命令运行中：${shell.command}（已 ${shellFor}s）`
+        : top
+          ? `正在执行 ${top.name}${top.detail ? `：${top.detail}` : ''}（已 ${runningFor}s）`
+          : `进行中…（已等待 ${secs}s）`;
       const heartbeatAnswer = state.lastAnswerText ?? '';
       if (regressedAnswer(state, heartbeatAnswer)) {
         // 已渲染正文比当前快照长（常见于重载后只拿到后半段）：不回退，等更长文本
@@ -495,6 +511,29 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     } catch (error) {
       logError('outbound settled finalize failed', error);
     }
+  };
+
+  // 后台命令开始/结束：立刻在卡片上体现状态，避免长时间显示“处理中”
+  terminalWatch.onChanged = (activity, exitCode) => {
+    const sessionId = watcher?.getStatus().sessionId;
+    if (!sessionId) {
+      return;
+    }
+    const state = activeStreams.get(sessionId);
+    if (!state?.messageId || state.doneAt) {
+      return;
+    }
+    const cards = buildStreamingCards({
+      title: 'Copilot · 处理中…',
+      tools: state.lastTools ?? [],
+      answer: state.lastAnswerText ?? '',
+      status: activity
+        ? `后台命令运行中：${activity.command}`
+        : `后台命令已结束${typeof exitCode === 'number' ? `（exit ${exitCode}）` : ''}，等待 Copilot 继续…`,
+      expanded: false,
+      showThinking: false,
+    });
+    void queueStreamCard(state, cards).catch((error) => logError('outbound shell status failed', error));
   };
 
   // 实时增量：transcript（回合进行中也会写）

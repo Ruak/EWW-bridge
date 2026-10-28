@@ -29,6 +29,8 @@ export class Injector {
     private readonly transcript?: TranscriptWatcher,
     /** 出站卡片最近一次成功发送/更新的时间（证明回合已经真的开始） */
     private readonly activity?: () => number,
+    /** 后台终端执行监视：等待后台命令期间不能注入，否则会把唤醒取消 */
+    private readonly shell?: { hasRecent(): boolean; current(): { command: string; startedAt: number } | undefined },
   ) {}
 
   get pending(): number {
@@ -187,17 +189,18 @@ export class Injector {
       const watcherBusy = this.watcher?.isBusy() ?? false;
       const transcriptBusy = this.transcript?.isTurnRunning() ?? false;
       const quiet = this.transcript?.quietMs ?? Number.MAX_SAFE_INTEGER;
+      const shell = this.shell?.current();
       // 判定依次收紧：chatSessions 落盘滞后，以 transcript 的 turn_start/turn_end + 在途工具为准；
       // transcript 长静默（>30s）时不再理会 chatSessions 的 isBusy（它可能只是没落盘）
-      if (!transcriptBusy && quiet > 2000 && (!watcherBusy || quiet > 30000)) {
+      if (!transcriptBusy && !shell && quiet > 2000 && (!watcherBusy || quiet > 30000)) {
         return true;
       }
       if (Date.now() - lastLogAt > 15000) {
         lastLogAt = Date.now();
         log(
-          `inject: 等待回合结束（chatSessions 忙=${watcherBusy}，transcript 运行中=${transcriptBusy}，静默 ${Math.round(
-            Math.min(quiet, 999999) / 1000,
-          )}s）`,
+          `inject: 等待回合结束（chatSessions 忙=${watcherBusy}，transcript 运行中=${transcriptBusy}` +
+            `${shell ? `，后台命令运行中=${Math.round((Date.now() - shell.startedAt) / 1000)}s` : ''}` +
+            `，静默 ${Math.round(Math.min(quiet, 999999) / 1000)}s）`,
         );
       }
       await delay(300);

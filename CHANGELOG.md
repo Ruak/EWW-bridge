@@ -2,6 +2,16 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.17
+
+- **卡片冻结的真因修复**：回退守卫的基准长度用的是原始长度，比较时却用去空白长度（1232ch 原文 = 1130ch 去空白），同一段文本被反复判成“回退”而丢弃 → 统一为去空白长度（持久化同口径）
+- **后台终端监视（`TerminalWatch`）**：订阅 `onDidStartTerminalShellExecution` / `onDidEndTerminalShellExecution`
+  - 卡片状态显示 `后台命令运行中：<cmd>（已 Ns）` / `后台命令已结束（exit N），等待 Copilot 继续…`，不再谎报“处理中”
+  - 后台等待期间**禁止静默收尾**（否则会把“等命令结束再唤醒”的回合提前结掉）
+  - 注入等待把“后台命令运行中”视为忙，避免注入把唤醒打断；常驻进程超过 10 分钟不再计入
+- **实测结论（写入文档）**：transcript/chatSessions 只在“下一条事件到来”时批量写盘，后台等待期间没有任何文件可读，正文必须等 `[Terminal … notification]` 唤醒才能同步；两边用时对比：同一回合 transcript 比 chatSessions 早 ~11s
+- 新增探针工具 `tools/probe-flush.js`、`tools/probe-marker.js`
+
 ## 1.0.16
 
 - **卡片永远停在“处理中”修复**：实测 transcript 最后一条是 `assistant.turn_start`，**VS Code 没有写 `assistant.turn_end`**，于是 `turnEndedAt` 恒为 0、软结束永不触发
