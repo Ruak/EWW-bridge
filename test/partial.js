@@ -66,6 +66,28 @@ const assert = (ok, message) => {
   await delay(400);
   assert(watcher.isBusy() === false, '空洞不能让 isBusy 永远为真');
 
+  // 3) 补丁流正文追踪：无需完整状态也能拿到最新回合正文（后台等待期靠它提前同步）
+  let tailEvent;
+  watcher.onTailText = (event) => {
+    tailEvent = event;
+  };
+  append({ kind: 2, k: ['requests'], v: [{ requestId: 'r-new', message: { text: '新问题' } }] });
+  append({ kind: 2, k: ['requests', 200, 'response'], v: [{ value: '第一段正文。' }] });
+  await delay(300);
+  append({
+    kind: 2,
+    k: ['requests', 200, 'response'],
+    v: [{ value: '第二段正文。' }, { kind: 'thinking', value: '思考不应计入正文' }],
+  });
+  await delay(1400);
+  const tail = watcher.tailText();
+  assert(!!tail, '补丁流里应能提取到正文');
+  assert(
+    tail.text === '第一段正文。第二段正文。',
+    `补丁流正文提取错误（思考混入或遗漏）: ${JSON.stringify(tail.text)}`,
+  );
+  assert(!!tailEvent && tailEvent.text.includes('第二段正文'), 'onTailText 应上报增量后的正文');
+
   watcher.stop();
   fs.rmSync(dir, { recursive: true, force: true });
   console.log('PASS: 残缺尾部标记 + 空洞不影响忙碌判定');

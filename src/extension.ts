@@ -286,10 +286,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   // 正文多源合并：只允许同一回合的 chatSessions 正文参与，避免新回合把上一轮的答复带出来
+  const turnTailText = (sessionId?: string): string => {
+    if (!watcher?.partialState) {
+      return '';
+    }
+    const tail = watcher.tailText();
+    if (!tail?.text) {
+      return '';
+    }
+    const startedAt = sessionId ? (lastTurnStartedAt.get(sessionId) ?? 0) : 0;
+    // 补丁流里上一回合的正文 firstAt 早于本回合起点 → 丢弃，避免上一条又串进来
+    if (startedAt > 0 && tail.firstAt < startedAt - 5000) {
+      return '';
+    }
+    return tail.text;
+  };
+
   const mergedAnswer = (fallback: string, index?: number): string => {
-    // 尾部解析出的 requests 是稀疏的，下标与真实回合号对不上，参与合并只会把旧回合正文带进来
     if (watcher?.partialState) {
-      return fallback;
+      // 残缺尾部下标不可信，改用补丁流实时正文（chatSessions 比 transcript 更早落盘）
+      return pickLonger(fallback || '', turnTailText(watcher.getStatus().sessionId));
     }
     const sessionText = watcher?.latestAnswerText(index) ?? '';
     return sessionText.length > (fallback || '').length ? sessionText : fallback;
@@ -801,6 +817,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
 
   if (watcher) {
+    // 补丁流拿到新正文：即使 transcript 还没落盘（后台等待期），也立刻推进卡片
+    watcher.onTailText = (event) => {
+      const state = activeStreams.get(event.sessionId);
+      if (!state?.messageId || state.doneAt) {
+        return;
+      }
+      const answer = pickLonger(event.text, state.lastAnswerText ?? '');
+      if (regressedAnswer(state, answer)) {
+        return;
+      }
+      if (normalize(answer) === normalize(state.lastAnswerText ?? '')) {
+        return;
+      }
+      const cards = buildStreamingCards({
+        title: 'Copilot · 处理中…',
+        tools: state.lastTools ?? [],
+        answer,
+        status: terminalWatch.hasRecent() ? '后台命令运行中，正文已更新' : '正在输出…',
+        expanded: false,
+        showThinking: false,
+        answerLimit: 12000,
+      });
+      state.lastAnswerText = answer;
+      state.pendingTextLen = answer.length;
+      void queueStreamCard(state, cards).catch((error) => logError('outbound tail text failed', error));
+    };
+
     watcher.onUser = (event) => {
       if (watcher!.partialState) {
         return;

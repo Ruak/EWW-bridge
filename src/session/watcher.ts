@@ -79,6 +79,9 @@ export class SessionWatcher {
   private lenient = false;
   /** 是否只解析了文件尾部（大文件）：此时 requests 有空洞、下标不可信 */
   private partialTail = false;
+  /** 补丁流里的正文追踪：请求下标 -> 累计正文（仅保留最近几个，限制内存） */
+  private tailTexts = new Map<number, { text: string; firstAt: number; lastAt: number; emittedAt: number; emittedText: string }>();
+  private tailLastKey?: number;
   /** 激活时的最后一条请求下标；比它更早的历史回合迟到补丁不得重放 */
   private replayFloor = 0;
 
@@ -91,6 +94,8 @@ export class SessionWatcher {
   onAssistant?: (event: AssistantEvent) => void;
   /** 回合结束前的增量内容（思考 / 已生成的回答 / 工具） */
   onPartial?: (event: AssistantEvent) => void;
+  /** 从补丁流里实时抽到的最新回合正文（不依赖下标，后台等待期也能拿到） */
+  onTailText?: (event: { sessionId: string; text: string; firstAt: number }) => void;
 
   constructor(private readonly chatSessionsDir: string, private readonly pollMs = 300) {}
 
@@ -268,6 +273,7 @@ export class SessionWatcher {
         this.lastChange = Date.now();
       }
       this.idleFallback();
+      this.flushTailText();
       if (Date.now() - this.lastCompact > 15000) {
         this.compactState();
       }
@@ -311,6 +317,8 @@ export class SessionWatcher {
     this.emitted.clear();
     this.completed.clear();
     this.seenRequests = 0;
+    this.tailTexts.clear();
+    this.tailLastKey = undefined;
 
     const stat = fs.statSync(file);
     // 大文件只解尾部：全量解析 300MB+ 会阻塞几十秒、峰值内存数 GB
@@ -410,6 +418,7 @@ export class SessionWatcher {
         continue;
       }
       try {
+        this.trackText(patch);
         this.state = this.lenient
           ? (applyPatchLenient(this.state, patch as any) as SessionState)
           : applyPatch(this.state, patch as any);
@@ -505,6 +514,88 @@ export class SessionWatcher {
       }
     }
     return -1;
+  }
+
+  /** 从补丁流里实时抽到的最新回合正文（不依赖下标）；firstAt 可用于判断是否属于当前回合 */
+  tailText(): { index: number; text: string; firstAt: number; lastAt: number } | undefined {
+    if (this.tailLastKey === undefined) {
+      return undefined;
+    }
+    const entry = this.tailTexts.get(this.tailLastKey);
+    if (!entry) {
+      return undefined;
+    }
+    return { index: this.tailLastKey, text: entry.text, firstAt: entry.firstAt, lastAt: entry.lastAt };
+  }
+
+  /**
+   * 补丁流正文追踪：chatSessions 比 transcript 更早落盘（实测后台等待期 +12s vs 等唤醒），
+   * 但大文件只能尾部解析、下标不可信，所以这里完全按“补丁路径 + 追加顺序”重建最新回合的正文。
+   */
+  private trackText(patch: any): void {
+    const path = patch?.k;
+    if (!Array.isArray(path) || path[0] !== 'requests') {
+      return;
+    }
+    const index = typeof path[1] === 'number' ? path[1] : undefined;
+    const isResponse = path[2] === 'response';
+    if (index === undefined || !isResponse) {
+      return;
+    }
+    const now = Date.now();
+    let entry = this.tailTexts.get(index);
+    if (!entry) {
+      entry = { text: '', firstAt: now, lastAt: 0, emittedAt: 0, emittedText: '' };
+      this.tailTexts.set(index, entry);
+      // 只保留最近 3 个请求，避免长会话累积
+      if (this.tailTexts.size > 3) {
+        const oldest = Array.from(this.tailTexts.entries())
+          .sort((a, b) => a[1].firstAt - b[1].firstAt)
+          .slice(0, this.tailTexts.size - 3);
+        for (const [key] of oldest) {
+          this.tailTexts.delete(key);
+        }
+      }
+    }
+    const parts = Array.isArray(patch.v) ? patch.v : [patch.v];
+    if (patch.kind === 1) {
+      // 整体赋值：重建该回合正文
+      entry.text = parts.map((part: any) => this.partText(part)).join('');
+    } else {
+      const appended = parts.map((part: any) => this.partText(part)).join('');
+      if (appended) {
+        entry.text = entry.text.length > 40000 ? entry.text.slice(-40000) : entry.text;
+        entry.text += appended;
+      }
+    }
+    entry.lastAt = now;
+    this.tailLastKey = index;
+    this.flushTailText(entry);
+  }
+
+  /** 节流上报：正文有增长且距上次上报 >= 800ms；未到时间就留给下一次 poll 补发，避免最后一段丢失 */
+  private flushTailText(entry?: { text: string; emittedAt: number; emittedText: string; firstAt: number }): void {
+    const target = entry ?? (this.tailLastKey !== undefined ? this.tailTexts.get(this.tailLastKey) : undefined);
+    if (!target || !target.text || target.text === target.emittedText) {
+      return;
+    }
+    const now = Date.now();
+    if (now - target.emittedAt < 800) {
+      return;
+    }
+    target.emittedAt = now;
+    target.emittedText = target.text;
+    this.onTailText?.({ sessionId: this.sessionId, text: target.text, firstAt: target.firstAt });
+  }
+
+  private partText(part: any): string {
+    if (!part || typeof part !== 'object') {
+      return '';
+    }
+    if (part.kind !== undefined) {
+      return '';
+    }
+    return typeof part.value === 'string' ? part.value : '';
   }
 
   private sig(text: string): string {

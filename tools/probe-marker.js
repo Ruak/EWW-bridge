@@ -6,11 +6,19 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const marker = process.argv[2];
+const markerArg = process.argv[2];
 const seconds = Number(process.argv[3] || 300);
 const hash = process.argv[4] || '56cd9cc3297d26e12e6b21456fb3748c';
+let marker = markerArg;
+if (!marker || marker === '--auto') {
+  // 自动生成标记并写到文件：避免标记出现在工具命令行/参数里，造成“假命中”
+  marker = `MARK-${Math.random().toString(36).slice(2, 6).toUpperCase()}-${Date.now().toString(36).toUpperCase()}`;
+  try {
+    fs.writeFileSync(path.join(os.homedir(), 'eww-marker.txt'), marker, 'utf8');
+  } catch {}
+}
 if (!marker) {
-  console.error('usage: node tools/probe-marker.js <marker> [seconds] [hash]');
+  console.error('usage: node tools/probe-marker.js [<marker>|--auto] [seconds] [hash]');
   process.exit(1);
 }
 const base = path.join(os.homedir(), 'AppData', 'Roaming', 'Code', 'User', 'workspaceStorage', hash);
