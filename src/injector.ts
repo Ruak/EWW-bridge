@@ -228,9 +228,12 @@ export class Injector {
 
   /**
    * 等待本轮结束。三种结果：
-   * - completed：产生了助手消息（正常）
-   * - ended：观察到忙碌后又变为空闲，但没有助手消息（被判为中/取消）——立即放行队列
+   * - completed：产生了助手消息，或 transcript 已落定（turn_end + 静默、无在途工具）
+   * - ended：该请求被中断（aborted），立即放行队列
    * - timeout：超过配置时长
+   *
+   * 注意：chatSessions 的 result 落盘会晚几十秒，不能作为唯一判据，
+   * 否则队列只能“等超时”才知道结束。transcript 是实时源，优先用它。
    */
   private async waitForTurnEnd(
     assistantCountBefore: number,
@@ -256,10 +259,22 @@ export class Injector {
           return 'ended';
         }
       }
-      // 兜底：只在新请求长时间无任何动静时才判结束（5 分钟）
-      const quietFor = Date.now() - (this.transcript?.lastActivity ?? startedAt);
+      if (this.transcript) {
+        const quietFor = Date.now() - this.transcript.lastActivity;
+        const settledNow =
+          this.transcript.settledAtMs > startedAt &&
+          this.transcript.toolInFlight === 0 &&
+          quietFor > 1500 &&
+          this.transcript.currentSessionId !== '';
+        if (settledNow) {
+          log(`inject: transcript 已落定（静默 ${Math.round(quietFor / 1000)}s），本轮结束`);
+          return 'completed';
+        }
+      }
+      // 兜底：新请求长时间无任何动静（5 分钟）才判结束，避免误伤长任务
+      const quietIdle = Date.now() - (this.transcript?.lastActivity ?? startedAt);
       const toolBusy = this.transcript?.toolInFlight ?? 0;
-      if (!this.watcher.isBusy() && quietFor > 300000 && toolBusy === 0) {
+      if (!this.watcher.isBusy() && quietIdle > 300000 && toolBusy === 0) {
         log('inject: 新请求 5 分钟无任何动静，判定为已结束');
         return 'ended';
       }

@@ -2,6 +2,15 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.12
+
+- **多实例单写者锁**：同一台机器多个窗口都装了本扩展时，只允许一个实例镜像/推送（globalStorage 锁 + 5s 心跳 + pid 存活检查）；其余窗口进入被动模式，状态栏显示“飞书(已接管)”
+- **日志带实例前缀**（`[w:xxxxxxxx]` / `[p:xxxxxxxx]`），再也不会分不清是谁在写卡片
+- **回合结束改为 transcript 优先**：`turn_end` + 静默 1.5s + 无在途工具即认为结束，不再死等 chatSessions 的 `result`（它往往晚 30s+），注入队列不再“等超时”
+- **长任务进展可见**：`tool.execution_start` 立即把卡片刷成「正在执行 run_in_terminal：npm test（已 Ns）」，心跳 5s 常驻，终端跑再久也不会看起来像卡住
+- **patch 节流**：同一张卡最小间隔 1.2s，降低飞书限频造成的丢帧（日志里 `soft finalize FAIL → ok`）
+- 新增回归测试 `test/instance.js`（第二个实例必须进入被动模式）
+
 ## 1.0.11
 
 - **同步卡住修复**：重载后尾部解析会碰到几小时前的历史回合迟到落盘（补上 `result`），旧实现把它当成新终稿发出去，把卡片绑定到错误回合，本轮真正的结果反而全部被当“迟到”丢弃 → 新增 `replayFloor`，只允许最后一条请求及其之后的新请求发终稿

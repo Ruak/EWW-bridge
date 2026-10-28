@@ -6,6 +6,12 @@ import * as vscode from 'vscode';
 let channel: vscode.OutputChannel | undefined;
 const LOG_FILE = path.join(os.homedir(), 'eww-bridge.log');
 const FILE_LOG_ENABLED = process.env.EWW_NO_FILE_LOG !== '1';
+/** 实例标识：多个窗口同时装扩展时，用它区分到底是谁在写卡片 */
+let instTag = '';
+
+export function setInstanceTag(tag: string): void {
+  instTag = tag ? `[${tag}] ` : '';
+}
 
 function appendFile(line: string): void {
   if (!FILE_LOG_ENABLED) {
@@ -46,7 +52,7 @@ function stringify(value: unknown): string {
 
 export function log(message: string, ...args: unknown[]): void {
   const suffix = args.length ? ' ' + args.map(stringify).join(' ') : '';
-  const line = `[${new Date().toLocaleTimeString()}] ${message}${suffix}`;
+  const line = `[${new Date().toLocaleTimeString()}] ${instTag}${message}${suffix}`;
   // 先落盘：通道写入可能因为被释放而抛错，不能阻断文件日志
   appendFile(line);
   try {

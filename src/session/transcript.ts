@@ -9,6 +9,13 @@ export interface StreamDelta {
   tools: string[];
 }
 
+/** 正在执行的工具（用于卡片显示“正在执行 xxx（已 Ns）”） */
+export interface ToolActivity {
+  name: string;
+  detail: string;
+  startedAt: number;
+}
+
 /**
  * 实时源：GitHub.copilot-chat/transcripts/<session>.jsonl
  *
@@ -44,12 +51,15 @@ export class TranscriptWatcher {
   private softFinalSent = false;
   private settledAt = 0;
   private toolInFlightCount = 0;
+  private toolStarts = new Map<string, ToolActivity>();
   private lastLoggedTextLen = 0;
 
   onDelta?: (event: StreamDelta) => void;
   onSoftFinal?: (event: StreamDelta) => void;
   onUserPrompt?: (event: { sessionId: string; text: string }) => void;
   onSessionChange?: (sessionId: string) => void;
+  /** 正在执行的工具变化（开始 / 结束），用于即时刷新卡片进展 */
+  onTool?: (activity: ToolActivity | undefined) => void;
   /** 回合进行中收到了新的 user.message（后台终端通知 / steering / 手动新消息） */
   onInterrupt?: (content: string) => void;
 
@@ -89,6 +99,16 @@ export class TranscriptWatcher {
     return this.settledAt > 0;
   }
 
+  /** 落定的时间戳（毫秒）；0 表示未落定 */
+  get settledAtMs(): number {
+    return this.settledAt;
+  }
+
+  /** 正在执行的工具（按开始时间升序） */
+  activeTools(): ToolActivity[] {
+    return Array.from(this.toolStarts.values()).sort((a, b) => a.startedAt - b.startedAt);
+  }
+
   /** 正在执行的工具数（tool.execution_start/complete 配对） */
   get toolInFlight(): number {
     return this.toolInFlightCount;
@@ -106,6 +126,7 @@ export class TranscriptWatcher {
     this.settledAt = 0;
     this.active = false;
     this.toolInFlightCount = 0;
+    this.toolStarts.clear();
   }
 
   private poll(): void {
@@ -241,6 +262,7 @@ export class TranscriptWatcher {
       this.softFinalSent = false;
       this.settledAt = 0;
       this.toolInFlightCount = 0;
+      this.toolStarts.clear();
       this.lastLoggedTextLen = 0;
       this.lastEventAt = Date.now();
       return;
@@ -272,12 +294,33 @@ export class TranscriptWatcher {
       if (typeof data.toolName === 'string') {
         this.pushTool(data.toolName);
       }
+      const callId = typeof data.toolCallId === 'string' ? data.toolCallId : `t${this.toolInFlightCount}`;
+      const activity: ToolActivity = {
+        name: typeof data.toolName === 'string' ? data.toolName : 'tool',
+        detail: this.toolDetail(data.arguments),
+        startedAt: Date.now(),
+      };
+      this.toolStarts.set(callId, activity);
       this.toolInFlightCount += 1;
+      this.onTool?.(activity);
       this.turnEndedAt = 0;
       this.softFinalSent = false;
       this.settledAt = 0;
     } else if (type === 'tool.execution_complete') {
+      const callId = typeof data.toolCallId === 'string' ? data.toolCallId : '';
+      if (callId) {
+        this.toolStarts.delete(callId);
+      } else if (this.toolStarts.size > 0) {
+        const oldest = this.activeTools()[0];
+        for (const [key, value] of this.toolStarts) {
+          if (value === oldest) {
+            this.toolStarts.delete(key);
+            break;
+          }
+        }
+      }
       this.toolInFlightCount = Math.max(0, this.toolInFlightCount - 1);
+      this.onTool?.(this.activeTools().slice(-1)[0]);
       this.turnEndedAt = 0;
       this.softFinalSent = false;
       this.settledAt = 0;
@@ -328,6 +371,22 @@ export class TranscriptWatcher {
     if (this.tools.length > 20) {
       this.tools.shift();
     }
+  }
+
+  /** 从工具参数里抽一行可读摘要（终端命令 / 搜索词 / 文件路径） */
+  private toolDetail(args: unknown): string {
+    if (!args || typeof args !== 'object') {
+      return '';
+    }
+    const obj = args as Record<string, unknown>;
+    for (const key of ['command', 'commandLine', 'query', 'filePath', 'path', 'url']) {
+      const value = obj[key];
+      if (typeof value === 'string' && value.trim()) {
+        const line = value.trim().split('\n')[0].trim();
+        return line.length > 90 ? `${line.slice(0, 90)}…` : line;
+      }
+    }
+    return '';
   }
 
   private flush(): void {

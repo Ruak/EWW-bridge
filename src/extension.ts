@@ -10,7 +10,8 @@ import { FeishuAdapter, InboundMessage } from './feishu/adapter';
 import { buildStreamingCards, splitMarkdown } from './feishu/card';
 import type { CardPair } from './feishu/card';
 import { Injector } from './injector';
-import { initLog, log, logError } from './log';
+import { acquireOwnership } from './instance';
+import { initLog, log, logError, setInstanceTag } from './log';
 import { createTranscriptWatcher, createWatcher } from './session/store';
 import { SessionWatcher } from './session/watcher';
 import { TranscriptWatcher } from './session/transcript';
@@ -32,6 +33,46 @@ const STATE_LABEL: Record<string, string> = {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   initLog();
+  const label = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || vscode.workspace.name || 'window';
+  const storageRoot =
+    context.globalStorageUri?.fsPath || context.storageUri?.fsPath || (process.env.TEMP || '.') + '\\eww-bridge';
+  const ownership = acquireOwnership(storageRoot, label);
+  setInstanceTag(ownership.owner ? `w:${ownership.instanceId}` : `p:${ownership.instanceId}`);
+  context.subscriptions.push({ dispose: () => ownership.dispose() });
+  if (!ownership.owner) {
+    const passive = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
+    passive.text = '$(circle-slash) 飞书(已接管)';
+    passive.tooltip = `EWW Bridge：本窗口未启用，由 ${ownership.ownerLabel ?? '其它窗口'} 负责推送`;
+    passive.show();
+    context.subscriptions.push(passive);
+    context.subscriptions.push(
+      vscode.commands.registerCommand('ewwBridge.showStatus', () => {
+        void vscode.window.showInformationMessage(
+          `EWW Bridge 已由 ${ownership.ownerLabel ?? '其它窗口'} 接管：同一条聊天只能有一个写者，否则卡片会被来回覆盖。`,
+        );
+      }),
+    );
+    for (const command of [
+      'ewwBridge.setCredentials',
+      'ewwBridge.connect',
+      'ewwBridge.disconnect',
+      'ewwBridge.testSend',
+      'ewwBridge.setDefaultChat',
+      'ewwBridge.showLogs',
+      'ewwBridge.dumpCurrentSession',
+      'ewwBridge.injectTest',
+    ]) {
+      context.subscriptions.push(
+        vscode.commands.registerCommand(command, () => {
+          void vscode.window.showWarningMessage(
+            `EWW Bridge：本窗口未启用（由 ${ownership.ownerLabel ?? '其它窗口'} 负责推送），请在接管窗口操作。`,
+          );
+        }),
+      );
+    }
+    log(`EWW Bridge ${(context.extension as any)?.packageJSON?.version ?? '?'} 未启用（多实例仲裁）`);
+    return;
+  }
   log(`EWW Bridge activated v${(context.extension as any)?.packageJSON?.version ?? 'unknown'}`);
 
   watcher = createWatcher(context);
@@ -256,13 +297,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   // 同一张卡只允许一个在途 patch：期间新帧只保留最新一帧，避免并发/乱序与堆积
+  const PATCH_MIN_MS = 1200;
   const queueStreamCard = (state: TurnStream, cards: CardPair): Promise<void> => {
     state.pendingPatch = cards;
     if (state.patching) {
       return state.patching;
     }
+    const wait = Math.max(0, PATCH_MIN_MS - (Date.now() - state.lastPatchAt));
     state.patching = (async () => {
       try {
+        if (wait > 0) {
+          await new Promise((resolve) => setTimeout(resolve, wait));
+        }
         while (state.pendingPatch) {
           const next = state.pendingPatch;
           state.pendingPatch = undefined;
@@ -291,16 +337,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const since = Date.now();
     const timer = setInterval(() => {
       const state = activeStreams.get(sessionId);
-      if (!state || state.doneAt || state.softFinalText) {
+      if (!state || state.doneAt) {
+        stopHeartbeat(sessionId);
+        return;
+      }
+      const running = transcript?.activeTools() ?? [];
+      const top = running[running.length - 1];
+      // 已软结束且没有在执行的工具：保持终稿外观，不再刷心跳
+      if (!top && state.softFinalText) {
         stopHeartbeat(sessionId);
         return;
       }
       const secs = Math.max(1, Math.round((Date.now() - since) / 1000));
+      const runningFor = top ? Math.max(1, Math.round((Date.now() - top.startedAt) / 1000)) : 0;
+      const status = top
+        ? `正在执行 ${top.name}${top.detail ? `：${top.detail}` : ''}（已 ${runningFor}s）`
+        : `进行中…（已等待 ${secs}s）`;
       const cards = buildStreamingCards({
-        title: 'Copilot · 处理中…',
+        title: state.softFinalText ? 'Copilot' : 'Copilot · 处理中…',
         tools: state.lastTools ?? [],
         answer: state.lastAnswerText ?? '',
-        status: `进行中…（已等待 ${secs}s）`,
+        status,
         expanded: false,
         showThinking: false,
       });
@@ -315,7 +372,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           logError('heartbeat patch failed', error);
         }
       })();
-    }, 10000);
+    }, 5000);
     heartbeats.set(sessionId, timer);
   };
   heartbeatCleanup = () => {
@@ -362,7 +419,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     transcript.onSoftFinal = (event) => {
       const config = readConfig();
-      stopHeartbeat(event.sessionId);
+      startHeartbeat(event.sessionId);
       lastContentActivityAt = Date.now();
       if (!config.forwardAssistant || !config.forwardStreaming) {
         return;
@@ -413,7 +470,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     transcript.onUserPrompt = (event) => {
       // 新一轮开始：上一轮的卡片要么已软结束（保留终稿），要么立即收尾，避免被新回合覆盖
-      const previous = activeStreams.get(event.sessionId);      // 刚注入时建的占位卡（还没有任何内容）才属于这一轮；有内容的卡说明上一轮已完成，必须释放
+      const previous = activeStreams.get(event.sessionId);
+      // 刚注入时建的占位卡（还没有任何内容）才属于这一轮；有内容的卡说明上一轮已完成，必须释放
       const hasContent =
         !!previous &&
         (!!previous.softFinalText ||
@@ -465,9 +523,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     transcript.onDelta = (event) => {
       const config = readConfig();
-      if (event.text.trim()) {
-        stopHeartbeat(event.sessionId);
-      }
+      startHeartbeat(event.sessionId);
       lastContentActivityAt = Date.now();
       if (activeStreams.get(event.sessionId)?.doneAt) {
         // 已推过终稿：等 watcher 的完整结果，避免回退到更短的流式内容
@@ -508,6 +564,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           await pushStreamCard(event.sessionId, chatId, cards);
         } catch (error) {
           logError('outbound delta failed', error);
+        }
+      })();
+    };
+
+    // 工具开始/结束：长终端运行期间也要让卡片看到进展（否则用户以为卡住了）
+    transcript.onTool = (activity) => {
+      const sessionId = transcript!.currentSessionId;
+      if (!sessionId) {
+        return;
+      }
+      startHeartbeat(sessionId);
+      const state = activeStreams.get(sessionId);
+      if (!state?.messageId || state.doneAt) {
+        return;
+      }
+      const cards = buildStreamingCards({
+        title: state.softFinalText ? 'Copilot' : 'Copilot · 处理中…',
+        tools: state.lastTools ?? [],
+        answer: state.lastAnswerText ?? '',
+        status: activity
+          ? `正在执行 ${activity.name}${activity.detail ? `：${activity.detail}` : ''}`
+          : '工具执行完成，处理中…',
+        expanded: false,
+        showThinking: false,
+      });
+      void (async () => {
+        try {
+          await queueStreamCard(state, cards);
+        } catch (error) {
+          logError('outbound tool progress failed', error);
         }
       })();
     };
