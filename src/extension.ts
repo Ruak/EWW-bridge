@@ -1493,6 +1493,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await feishu.sendMarkdown(chatId, 'EWW Bridge 测试', `**连接正常**\n\n- 时间：${new Date().toLocaleString()}\n- 会话：${watcher?.getStatus().sessionId || '-'}`, 'green');
       await vscode.window.showInformationMessage('测试消息已发送。');
     }),
+    vscode.commands.registerCommand('ewwBridge.followLatestSession', async () => {
+      if (!watcher) {
+        await vscode.window.showWarningMessage('未找到会话目录。');
+        return;
+      }
+      const before = watcher.getStatus().sessionId;
+      const after = watcher.forceFollowLatest() ?? '';
+      if (after && after !== before) {
+        log(`outbound: 手动切换到最新会话 ${after.slice(0, 8)}`);
+        await vscode.window.showInformationMessage(`已切换到最新会话 ${after.slice(0, 8)}（发一条消息即可开始镜像）。`);
+        updateStatus();
+      } else {
+        await vscode.window.showInformationMessage(`当前会话就是最新的（${(after || '-').slice(0, 8)}）。`);
+      }
+    }),
     vscode.commands.registerCommand('ewwBridge.dumpCurrentSession', async () => {
       if (!watcher) {
         await vscode.window.showWarningMessage('未找到会话目录。');

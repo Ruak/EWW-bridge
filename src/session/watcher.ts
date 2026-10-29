@@ -240,6 +240,17 @@ export class SessionWatcher {
     return lines.join('\n');
   }
 
+  /** 手动跟随最新会话（新开了对话但没自动切过去时用） */
+  forceFollowLatest(): string | undefined {
+    const active = this.findActiveFile();
+    if (active && active !== this.file) {
+      log(`watcher: 手动切换会话 -> ${path.basename(active, '.jsonl').slice(0, 8)}`);
+      this.attach(active);
+      return this.sessionId;
+    }
+    return this.sessionId;
+  }
+
   private poll(): void {
     try {
       if (!this.file) {
@@ -254,8 +265,13 @@ export class SessionWatcher {
         // 只有当前会话已经彻底停了（2 分钟内无写入）才切换到新文件，
         // 否则其它聊天标签页/后台会话一被触碰就会把镜像“抢走”，表现得像乱入消息
         let currentFresh = false;
+        let createdNewer = false;
         try {
-          currentFresh = !!this.file && Date.now() - fs.statSync(this.file).mtimeMs < 120000;
+          const cur = fs.statSync(this.file);
+          const next = fs.statSync(active);
+          currentFresh = Date.now() - cur.mtimeMs < 120000;
+          // 新建会话的判定：候选文件的创建时间晚于当前文件的最后一次写入
+          createdNewer = next.birthtimeMs > cur.mtimeMs + 1000;
         } catch {
           currentFresh = false;
         }
@@ -265,7 +281,8 @@ export class SessionWatcher {
         } catch {
           activeFresh = false;
         }
-        if (!currentFresh && activeFresh) {
+        // “开了新对话”这个场景要立即切：新文件是刚创建的，且当前会话没有在跑的回合
+        if ((createdNewer && !this.isBusy()) || (!currentFresh && activeFresh)) {
           log(`watcher: 切换会话 ${path.basename(this.file, '.jsonl').slice(0, 8)} -> ${path.basename(active, '.jsonl').slice(0, 8)}`);
           this.attach(active);
           return;
