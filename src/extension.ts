@@ -845,8 +845,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (watcher) {
     // 补丁流拿到新正文：即使 transcript 还没落盘（后台等待期），也立刻推进卡片
     watcher.onTailText = (event) => {
-      if (!readConfig().patchStreamText) {
-        // 默认关闭：补丁流里的段落边界不可靠，容易把别的段落内容写进当前卡片
+      if (!readConfig().patchStreamText || transcript?.isAgentSession) {
+        // 默认关闭；agent 会话时 chatSessions 属于别的聊天，绝不能混用
         return;
       }
       const state = activeStreams.get(event.sessionId);
@@ -884,6 +884,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 补丁流里出现 result = 回合真正结束（只用来收尾，绝不引入补丁流正文，避免串段）
     watcher.onTailComplete = (event) => {
+      if (transcript?.isAgentSession) {
+        return;
+      }
       const state = activeStreams.get(event.sessionId);
       if (!state?.messageId || state.doneAt) {
         return;

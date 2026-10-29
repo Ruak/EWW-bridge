@@ -2,6 +2,19 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.24
+
+### 修复：新式 agent 会话（右侧「会话」面板）不同步
+
+- 定位：这类对话不再写 `workspaceStorage/<hash>/chatSessions`，而是实时写入
+  `~/.copilot/session-state/<sessionId>/events.jsonl`（旧的 chatSessions 文件停在几天前）。
+- `TranscriptWatcher` 改为多数据源：同时扫描 `GitHub.copilot-chat/transcripts/*.jsonl`
+  与 `~/.copilot/session-state/*/events.jsonl`，按 mtime 取最新；agent 会话用
+  `workspace.yaml` 的 `cwd`/`git_root` 过滤，避免多窗口/多项目串台。
+- agent 会话期间忽略 chatSessions 的补丁流尾部事件（那是另一个聊天，会串段/提前收尾）。
+- 事件结构（`assistant.message.content`、`toolRequests`、`turn_start/end`）与 transcript 完全一致，
+  解析、回滚入库、卡片流式逻辑全部复用。
+
 ## 1.0.23
 
 - 新会话切换条件再放宽：候选会话文件比当前会话**晚创建 60 秒以上**也视为“新对话”，即使旧会话还在被写入也能切过去（配合 `EWW Bridge: 跟随最新会话` 手动保底）

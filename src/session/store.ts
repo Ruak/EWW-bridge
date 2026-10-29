@@ -1,8 +1,10 @@
 import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs';
 import * as vscode from 'vscode';
 import { log } from '../log';
 import { SessionWatcher } from './watcher';
-import { TranscriptWatcher } from './transcript';
+import { TranscriptSource, TranscriptWatcher } from './transcript';
 
 export interface SessionPaths {
   chatSessionsDir?: string;
@@ -44,9 +46,20 @@ export function createWatcher(context: vscode.ExtensionContext): SessionWatcher 
 
 export function createTranscriptWatcher(context: vscode.ExtensionContext): TranscriptWatcher | undefined {
   const paths = resolveSessionPaths(context);
-  if (!paths.transcriptsDir) {
+  const sources: TranscriptSource[] = [];
+  if (paths.transcriptsDir) {
+    sources.push({ dir: paths.transcriptsDir, layout: 'flat' });
+  }
+  // Copilot agent 会话（右侧「会话」面板里的新式对话）：事件格式与 transcript 一致，且实时落盘
+  const agentRoot = path.join(os.homedir(), '.copilot', 'session-state');
+  if (fs.existsSync(agentRoot)) {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    sources.push({ dir: agentRoot, layout: 'session-state', workspaceFolder: folder });
+    log(`transcript: 已加入 agent 会话源 ${agentRoot}${folder ? `（项目 ${folder}）` : ''}`);
+  }
+  if (sources.length === 0) {
     return undefined;
   }
-  log(`transcript: 目录 ${paths.transcriptsDir}`);
-  return new TranscriptWatcher(paths.transcriptsDir, 200);
+  log(`transcript: 目录 ${sources.map((s) => s.dir).join(' | ')}`);
+  return new TranscriptWatcher(sources, 200);
 }

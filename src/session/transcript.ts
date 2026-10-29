@@ -16,6 +16,14 @@ export interface ToolActivity {
   startedAt: number;
 }
 
+/** 数据源：普通 transcript 目录，或 Copilot agent 会话目录（~/.copilot/session-state/<id>/events.jsonl） */
+export interface TranscriptSource {
+  dir: string;
+  layout: 'flat' | 'session-state';
+  /** session-state 模式下的项目目录（用 workspace.yaml 的 cwd 过滤，避免跨项目串台） */
+  workspaceFolder?: string;
+}
+
 /**
  * 实时源：GitHub.copilot-chat/transcripts/<session>.jsonl
  *
@@ -25,6 +33,7 @@ export interface ToolActivity {
  * 因此在长回合里也能拿到思考与正文，用于流式卡片。
  *
  * chatSessions 仍然负责：用户提问、回合结束（result）与最终权威文本。
+ * 另外还支持第二个源：~/.copilot/session-state/<id>/events.jsonl（agent 会话，事件格式完全一致且实时落盘）。
  */
 export class TranscriptWatcher {
   private timer?: NodeJS.Timeout;
@@ -72,7 +81,15 @@ export class TranscriptWatcher {
   /** 回合进行中收到了新的 user.message（后台终端通知 / steering / 手动新消息） */
   onInterrupt?: (content: string) => void;
 
-  constructor(private readonly dir: string, private readonly pollMs = 200) {}
+  constructor(
+    private readonly sourceInput: string | TranscriptSource[],
+    private readonly pollMs = 200,
+  ) {
+    this.sources =
+      typeof sourceInput === 'string' ? [{ dir: sourceInput, layout: 'flat' }] : sourceInput;
+  }
+
+  private readonly sources: TranscriptSource[];
 
   start(): void {
     this.poll();
@@ -101,6 +118,11 @@ export class TranscriptWatcher {
 
   get currentSessionId(): string {
     return this.sessionId;
+  }
+
+  /** 当前是否在跟随 agent 会话（~/.copilot/session-state），此时 chatSessions 属于别的聊天，不能混用 */
+  get isAgentSession(): boolean {
+    return !!this.file && this.file.replace(/\\/g, '/').includes('/.copilot/session-state/');
   }
 
   /** 本轮是否已真正落定（turn_end 后静默超过阈值），仅作辅助信号 */
@@ -191,28 +213,63 @@ export class TranscriptWatcher {
   }
 
   private findNewest(): string | undefined {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(this.dir, { withFileTypes: true });
-    } catch {
-      return undefined;
-    }
     let best: { file: string; mtime: number } | undefined;
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
+    for (const source of this.sources) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(source.dir, { withFileTypes: true });
+      } catch {
         continue;
       }
-      const full = path.join(this.dir, entry.name);
-      try {
-        const stat = fs.statSync(full);
-        if (!best || stat.mtimeMs > best.mtime) {
-          best = { file: full, mtime: stat.mtimeMs };
+      if (source.layout === 'flat') {
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+          const full = path.join(source.dir, entry.name);
+          try {
+            const stat = fs.statSync(full);
+            if (!best || stat.mtimeMs > best.mtime) best = { file: full, mtime: stat.mtimeMs };
+          } catch {
+            /* 文件可能刚被替换 */
+          }
         }
-      } catch {
-        /* 文件可能刚被替换 */
+        continue;
+      }
+      // session-state：<dir>/<sessionId>/events.jsonl，用 workspace.yaml 的 cwd 过滤本项目
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const sessionDir = path.join(source.dir, entry.name);
+        const events = path.join(sessionDir, 'events.jsonl');
+        if (!fs.existsSync(events)) continue;
+        if (source.workspaceFolder && !this.sessionMatchesFolder(sessionDir, source.workspaceFolder)) {
+          continue;
+        }
+        try {
+          const stat = fs.statSync(events);
+          if (!best || stat.mtimeMs > best.mtime) best = { file: events, mtime: stat.mtimeMs };
+        } catch {
+          /* 忽略 */
+        }
       }
     }
     return best?.file;
+  }
+
+  /** 用 workspace.yaml 的 cwd / git_root 判断该 agent 会话是否属于当前项目 */
+  private sessionMatchesFolder(sessionDir: string, folder: string): boolean {
+    try {
+      const text = fs.readFileSync(path.join(sessionDir, 'workspace.yaml'), 'utf8');
+      const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+      const target = norm(folder);
+      for (const line of text.split('\n')) {
+        const m = /^(cwd|git_root):\s*(.+)$/.exec(line.trim());
+        if (m && norm(m[2].trim()) === target) {
+          return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
   }
 
   private attach(file: string): void {
