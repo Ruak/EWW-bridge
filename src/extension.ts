@@ -317,6 +317,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   const mergedAnswer = (fallback: string, index?: number): string => {
+    if (transcript?.isAgentSession) {
+      // agent 会话的 chatSessions 文件属于另一个聊天，任何长度比较都会串段：只用 transcript 正文
+      return fallback;
+    }
     if (watcher?.partialState) {
       const sessionId = watcher.getStatus().sessionId;
       const state = activeStreams.get(sessionId);
@@ -905,7 +909,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
 
     watcher.onUser = (event) => {
-      if (watcher!.partialState) {
+      if (watcher!.partialState || transcript?.isAgentSession) {
+        // agent 会话的提问由 transcript.onUserPrompt 即时推送；这里的 chatSessions 属于另一个聊天
         return;
       }
       const config = readConfig();
@@ -995,7 +1000,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 兜底：transcript 不可用（或尚未产生增量）时，用 chatSessions 的增量
     watcher.onPartial = (event) => {
-      if (watcher!.partialState) {
+      if (watcher!.partialState || transcript?.isAgentSession) {
         return;
       }
       const config = readConfig();
@@ -1047,8 +1052,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
 
     watcher.onAssistant = (event) => {
-      if (watcher!.partialState) {
-        // 残缺尾部：终稿会由 transcript 的软结束推送，这里的下标/正文都不可信
+      if (watcher!.partialState || transcript?.isAgentSession) {
+        // 残缺尾部：终稿会由 transcript 的软结束推送，这里的下标/正文都不可信；
+        // agent 会话的 chatSessions 文件属于另一个聊天，更不能拿来写当前卡片
         return;
       }
       const config = readConfig();

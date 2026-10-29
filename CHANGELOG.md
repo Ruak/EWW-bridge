@@ -2,6 +2,23 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.26
+
+### 修复：agent 会话最后一条（最终答复）不同步
+
+- 根因：agent 模式下最终答复**不在** `assistant.message.data.content`（该字段为空），
+  而是塞在 `task_complete` 工具的参数 `arguments.summary`，以及事件流末尾的 `session.task_complete.data.summary`。
+  旧解析只读 `content`，所以卡片停在倒数第二条，正好“最后一条没同步”。
+- `TranscriptWatcher` 现在把 `task_complete` 的 `summary` 并入本轮正文（两个来源去重，不重复追加），
+  并把 `task_complete` 从“正在执行工具”列表里排除（它不是真正的工具调用）。
+- agent 会话期间彻底屏蔽 chatSessions 通道（`onUser` / `onPartial` / `onAssistant` / `mergedAnswer`）：
+  同工作区的 chatSessions 文件属于另一个聊天，拿来做“取更长”比较会把别段正文写进当前卡片。
+- 新增 `test/agent-task-complete.js` 覆盖该场景。
+
+## 1.0.25
+
+（同日中间的内部构建：agent 会话数据源的多源改造，已并入 1.0.24/1.0.26）
+
 ## 1.0.24
 
 ### 修复：新式 agent 会话（右侧「会话」面板）不同步

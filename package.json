@@ -2,7 +2,7 @@
   "name": "eww-bridge",
   "displayName": "EWW Bridge — Copilot Chat to Feishu / Lark",
   "description": "Stream your active VS Code Copilot Chat session to a Feishu/Lark card in real time, and send new tasks from Feishu back into the same chat session.",
-  "version": "1.0.24",
+  "version": "1.0.26",
   "publisher": "huangdan",
   "license": "MIT",
   "icon": "assets/icon.png",
@@ -173,7 +173,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
-    "test": "node test/card.js && node test/parser.js && node test/transcript.js && node test/smoke.js && node test/replay-floor.js && node test/partial.js && node test/instance.js && node test/activate.js",
+    "test": "node test/card.js && node test/parser.js && node test/transcript.js && node test/agent-task-complete.js && node test/smoke.js && node test/replay-floor.js && node test/partial.js && node test/instance.js && node test/activate.js",
     "package": "vsce package",
     "publish": "vsce publish"
   },

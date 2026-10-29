@@ -439,10 +439,25 @@ export class TranscriptWatcher {
       const toolRequests: any[] = Array.isArray(data.toolRequests) ? data.toolRequests : [];
       for (const request of toolRequests) {
         if (request && typeof request.name === 'string') {
+          // agent 会话的最终答复不在 content，而在 task_complete 工具参数的 summary 里
+          if (request.name === 'task_complete') {
+            const summary =
+              request.arguments && typeof request.arguments.summary === 'string'
+                ? request.arguments.summary
+                : '';
+            this.appendFinalAnswer(summary);
+            continue;
+          }
           this.pushTool(request.name);
         }
       }
       this.turnEndedAt = 0;
+      this.softFinalSent = false;
+      this.settledAt = 0;
+    } else if (type === 'session.task_complete') {
+      // 同一段收尾文案的另一个来源（事件流最后一条），去重后追加
+      // 不能清 turnEndedAt：这条事件常常紧跟在 turn_end 之后，清零会把收尾推迟到 120s 兜底
+      this.appendFinalAnswer(typeof data.summary === 'string' ? data.summary : '');
       this.softFinalSent = false;
       this.settledAt = 0;
     } else if (type === 'tool.execution_start') {
@@ -549,6 +564,22 @@ export class TranscriptWatcher {
 
   private appendText(chunk: string): void {
     this.text = capTail(`${this.text}${this.text ? '\n\n' : ''}${chunk}`, 20000);
+  }
+
+  /**
+   * agent（新式会话）的最终答复：assistant.message.content 为空，正文放在
+   * `task_complete` 工具参数的 summary（以及最后的 `session.task_complete` 事件）里。
+   * 两个来源都要收，且去重。
+   */
+  private appendFinalAnswer(summary: string): void {
+    const text = (summary || '').trim();
+    if (!text) {
+      return;
+    }
+    if (this.text.trim().endsWith(text)) {
+      return;
+    }
+    this.appendText(text);
   }
 
   private pushTool(name: string): void {
