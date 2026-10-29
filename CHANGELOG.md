@@ -2,6 +2,22 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.1.1 — VS Code 升级后的自适应与自检
+
+### 新增
+
+- 命令 `EWW Bridge: 兼容性自检（VS Code 升级后用）`：一键检查
+  VS Code / 插件 / Copilot 版本、补丁状态与文件路径、`chatSessions` 与 `transcripts` 目录、
+  agent 会话目录（是否属于当前项目）、最新事件文件的类型命中数，并给出结论；有问题的项会逐条列出。
+- 新增 `src/compat.ts`（纯函数报告，可单测）与 `test/compat.js`、`test/copilot-anchors.js`。
+
+### 改进
+
+- 补丁锚点**不再依赖压缩后的变量名**：改为正则匹配 `_bufferEntry(...){let x=this._activeSessions.get(...)}`
+  与 `async flush(...)`，允许空格/参数重命名；结构真的变了则拒绝写入并提示反馈。
+- 激活日志现在记录 `VS Code 版本 · Copilot 版本 · 补丁状态`，方便定位升级后的回归。
+- 随插件发布的 `scripts/patch-copilot-flush.js` 同步使用正则锚点。
+
 ## 1.1.0 — 内置 Copilot 落盘补丁随插件发布
 
 ### 新增

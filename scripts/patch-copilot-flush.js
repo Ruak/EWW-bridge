@@ -23,8 +23,34 @@ const path = require('path');
 const { execFileSync } = require('child_process');
 
 const MARK = '_bufferEntryCore';
-const DEFINE_ANCHOR = '_bufferEntry(e,n,r){let o=this._activeSessions.get(e);';
-const FLUSH_ANCHOR = 'async flush(e){let n=this._activeSessions.get(e);';
+// 锚点用正则：VS Code 升级后压缩器变量名（e/n/r/o）可能变，但方法名与结构不变
+const DEFINE_RE =
+  /_bufferEntry\(\s*([\w$]+)\s*,\s*([\w$]+)\s*,\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+const FLUSH_RE = /async flush\(\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+
+/** 生成补丁源码；返回 { ok, code, reason } */
+function buildPatchedCode(code) {
+  if (code.includes(MARK)) {
+    return { ok: false, reason: 'already' };
+  }
+  const define = DEFINE_RE.exec(code);
+  if (!define) {
+    return { ok: false, reason: 'define-anchor' };
+  }
+  const [, a, b, c] = define;
+  const defineText = define[0];
+  const coreText = defineText.replace('_bufferEntry(', '_bufferEntryCore(');
+  let next = code.slice(0, define.index) + coreText + code.slice(define.index + defineText.length);
+  const flush = FLUSH_RE.exec(next);
+  if (!flush) {
+    return { ok: false, reason: 'flush-anchor' };
+  }
+  const wrapper =
+    `_bufferEntry(${a},${b},${c}){this._bufferEntryCore(${a},${b},${c});` +
+    `void this.flush(${a}).catch(()=>{})}`;
+  next = next.slice(0, flush.index) + wrapper + next.slice(flush.index);
+  return { ok: true, code: next };
+}
 
 function walkForBundle(root, depth, found) {
   if (!root) {
@@ -123,17 +149,17 @@ if (patched) {
   process.exit(0);
 }
 
-if (!code.includes(DEFINE_ANCHOR) || !code.includes(FLUSH_ANCHOR)) {
-  console.error('锚点不匹配：当前 VS Code 版本的 Copilot 打包结构已变化，未做修改。');
-  process.exit(1);
+if (!code.includes(MARK)) {
+  const built = buildPatchedCode(code);
+  if (!built.ok) {
+    console.error(`锚点不匹配（${built.reason}）：当前 VS Code / Copilot 的打包结构可能已变化，未做修改。`);
+    console.error('请到插件仓库反馈，或等待插件更新；期间功能照常。');
+    process.exit(1);
+  }
+  code = built.code;
 }
 
-const next = code
-  .replace(DEFINE_ANCHOR, `_bufferEntryCore(e,n,r){let o=this._activeSessions.get(e);`)
-  .replace(
-    FLUSH_ANCHOR,
-    `_bufferEntry(e,n,r){this._bufferEntryCore(e,n,r);void this.flush(e).catch(()=>{})}${FLUSH_ANCHOR}`,
-  );
+const next = code;
 
 const tmp = path.join(os.tmpdir(), `eww-copilot-check-${process.pid}.cjs`);
 fs.writeFileSync(tmp, next, 'utf8');

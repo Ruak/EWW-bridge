@@ -15,8 +15,37 @@ import { log } from './log';
  * `scripts/patch-copilot-flush.js` 使用同一套锚点。
  */
 const MARK = '_bufferEntryCore';
-const DEFINE_ANCHOR = '_bufferEntry(e,n,r){let o=this._activeSessions.get(e);';
-const FLUSH_ANCHOR = 'async flush(e){let n=this._activeSessions.get(e);';
+// 锚点用正则而不是固定字符串：VS Code 升级后压缩器的变量名（e/n/r/o）可能变，但方法名与结构不变
+const DEFINE_RE =
+  /_bufferEntry\(\s*([\w$]+)\s*,\s*([\w$]+)\s*,\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+const FLUSH_RE = /async flush\(\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+
+/**
+ * 生成打过补丁的 bundle 源码（纯函数，便于单测）。
+ * 做两件事：`_bufferEntry` 改名 `_bufferEntryCore`，再插入一个同名包装方法，每条事件后立即 flush。
+ */
+export function buildPatchedCode(code: string): { ok: boolean; code?: string; reason?: string } {
+  if (code.includes(MARK)) {
+    return { ok: false, reason: 'already' };
+  }
+  const define = DEFINE_RE.exec(code);
+  if (!define || define.index === undefined) {
+    return { ok: false, reason: 'define-anchor' };
+  }
+  const [, a, b, c] = define;
+  const defineText = define[0];
+  const coreText = defineText.replace('_bufferEntry(', '_bufferEntryCore(');
+  let next = code.slice(0, define.index) + coreText + code.slice(define.index + defineText.length);
+  const flush = FLUSH_RE.exec(next);
+  if (!flush || flush.index === undefined) {
+    return { ok: false, reason: 'flush-anchor' };
+  }
+  const wrapper =
+    `_bufferEntry(${a},${b},${c}){this._bufferEntryCore(${a},${b},${c});` +
+    `void this.flush(${a}).catch(()=>{})}`;
+  next = next.slice(0, flush.index) + wrapper + next.slice(flush.index);
+  return { ok: true, code: next };
+}
 
 export type CopilotPatchState = 'patched' | 'clean' | 'unsupported' | 'missing';
 
@@ -131,7 +160,7 @@ export function copilotPatchStatus(): CopilotPatchStatus {
     const code = fs.readFileSync(file, 'utf8');
     const state: CopilotPatchState = code.includes(MARK)
       ? 'patched'
-      : code.includes(DEFINE_ANCHOR) && code.includes(FLUSH_ANCHOR)
+      : DEFINE_RE.test(code) && FLUSH_RE.test(code)
         ? 'clean'
         : 'unsupported';
     return { state, file, backup: fs.existsSync(`${file}.eww-orig`) };
@@ -159,19 +188,17 @@ export function applyCopilotPatch(): CopilotPatchOutcome {
   if (code.includes(MARK)) {
     return { ok: true, alreadyPatched: true, file, message: '已经打过补丁，无需重复。' };
   }
-  if (!code.includes(DEFINE_ANCHOR) || !code.includes(FLUSH_ANCHOR)) {
+  const built = buildPatchedCode(code);
+  if (!built.ok || !built.code) {
     return {
       ok: false,
       file,
-      message: '当前 VS Code 版本的 Copilot 打包代码结构已变化（锚点不匹配），未做任何修改。',
+      message:
+        `当前 VS Code / Copilot 版本的打包代码结构已变化（${built.reason || 'anchor'}），未做任何修改。` +
+        '请执行「EWW Bridge: 兼容性自检」并反馈日志，或等待插件更新；期间功能照常，只是长任务时卡片更新会滞后。',
     };
   }
-  const next = code
-    .replace(DEFINE_ANCHOR, `_bufferEntryCore(e,n,r){let o=this._activeSessions.get(e);`)
-    .replace(
-      FLUSH_ANCHOR,
-      `_bufferEntry(e,n,r){this._bufferEntryCore(e,n,r);void this.flush(e).catch(()=>{})}${FLUSH_ANCHOR}`,
-    );
+  const next = built.code;
   try {
     // 语法校验：坏补丁会让 Copilot 整个起不来，必须先确认能解析
     new vm.Script(next, { filename: file });

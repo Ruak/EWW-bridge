@@ -87,6 +87,7 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 | `EWW Bridge: 模拟飞书下发(注入当前会话)` | Test inbound injection |
 | `EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）` | Make Copilot flush its transcript immediately (see below) |
 | `EWW Bridge: 还原内置 Copilot 落盘补丁` | Restore the original Copilot bundle |
+| `EWW Bridge: 兼容性自检（VS Code 升级后用）` | Report whether every assumption still holds |
 
 The output channel also logs card updates with `(+XXms)` API round-trip timings.
 
@@ -116,6 +117,24 @@ auto-detects the newest VS Code install, including versioned layouts such as
 `…/Microsoft VS Code/<hash>/resources/app/extensions/copilot/dist/extension.js`.
 
 This is optional: without it EWW still works, cards just update less promptly during long tool steps.
+
+## After a VS Code upgrade
+
+Upgrading VS Code can break internals this extension relies on. What happens automatically vs. what
+needs an update:
+
+| Layer | Behaviour after upgrade |
+|---|---|
+| Copilot install path (new `<hash>` dir) | Self-healing: candidates are walked and the **newest** `extension.js` wins |
+| Flush patch | Overwritten by the upgrade → status becomes `clean` and the one-time prompt returns; re-run the patch |
+| Patch anchors | Matched by **regex** on `_bufferEntry(...){let x=this._activeSessions.get(...)}` / `async flush(...)`, so minifier variable renames do not break it. If the structure really changes, the patch refuses to write and asks for a report |
+| Transcript / agent event schema | Not self-healing — `EWW Bridge: 兼容性自检` probes the tail of the newest transcript for known event types |
+| `chatSessions` patch-stream format (`kind0/1/2`) | Not self-healing — the compat report checks the directory and newest file |
+| `workbench.action.chat.*` commands | Stable in practice; if injection stops working the compat report will not catch it |
+
+Run `EWW Bridge: 兼容性自检（VS Code 升级后用）` after every VS Code or Copilot update. It prints
+versions, patch state, session directories, event-type counts and a one-line verdict to the log
+(`EWW Bridge: 显示日志`), and lists anything that needs adapting.
 
 ## Chat commands (sent from Feishu)
 
@@ -220,6 +239,13 @@ VS Code 把 Copilot 的会话记录缓存在内存里，要等下一条事件才
 - **VS Code 升级会覆盖该文件**，插件会重新提示；也可手动跑随插件发布的脚本：
   `node "<插件目录>/scripts/patch-copilot-flush.js"`（`--check` / `--restore` / `--path`）
 - VS Code 装在 `Program Files` 时需要管理员权限：用管理员身份启动一次 VS Code，或用管理员终端运行上面的脚本
+
+**VS Code / Copilot 升级后**
+
+- 安装目录换了新的 `<hash>` 子目录：插件会自动找到最新的那个，无需手动改
+- 补丁会被升级覆盖：状态变回「未打」，插件会再提示一次，重新打即可
+- 补丁锚点已改成**正则匹配**（变量名被改成 `t/i/s` 也不影响）；如果结构真变了，补丁会拒绝写入而不是写坏
+- 执行 `EWW Bridge: 兼容性自检（VS Code 升级后用）`：会打印版本、补丁状态、会话目录、事件类型命中情况与结论，明确指出哪一层需要适配（详情在日志）
 
 **行为说明**
 

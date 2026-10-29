@@ -1,4 +1,7 @@
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
+import { buildCompatReport } from './compat';
 import {
   getAppSecret,
   readConfig,
@@ -13,7 +16,7 @@ import type { CardPair } from './feishu/card';
 import { Injector } from './injector';
 import { acquireOwnership } from './instance';
 import { initLog, log, logError, setInstanceTag } from './log';
-import { createTranscriptWatcher, createWatcher } from './session/store';
+import { createTranscriptWatcher, createWatcher, resolveSessionPaths } from './session/store';
 import { SessionWatcher } from './session/watcher';
 import { TerminalWatch } from './session/terminalWatch';
 import { TranscriptWatcher } from './session/transcript';
@@ -1620,6 +1623,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.window.showWarningMessage(outcome.message);
       }
     }),
+    vscode.commands.registerCommand('ewwBridge.compatCheck', async () => {
+      const paths = resolveSessionPaths(context);
+      const patchState = copilotPatchStatus();
+      const copilotExt =
+        vscode.extensions?.getExtension?.('GitHub.copilot') || vscode.extensions?.getExtension?.('GitHub.copilot-chat');
+      const selfExt = vscode.extensions?.getExtension?.('huangdan.eww-bridge');
+      const report = buildCompatReport({
+        vscodeVersion: vscode.version,
+        extensionVersion: (selfExt?.packageJSON as { version?: string } | undefined)?.version,
+        copilotVersion: (copilotExt?.packageJSON as { version?: string } | undefined)?.version,
+        patchState: patchState.state,
+        patchFile: patchState.file,
+        scriptPath: patchScriptPath(),
+        chatSessionsDir: paths.chatSessionsDir,
+        transcriptDir: paths.transcriptsDir,
+        agentRoot: path.join(os.homedir(), '.copilot', 'session-state'),
+        workspaceFolder: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        sessionId: transcript?.currentSessionId,
+        isAgentSession: transcript?.isAgentSession,
+        quietMs: transcript?.quietMs,
+      });
+      log(`---- 兼容性自检 ----\n${report.lines.join('\n')}`);
+      initLog().show();
+      await vscode.window.showInformationMessage(
+        report.ok
+          ? '兼容性自检通过：当前版本组合的各项假设都成立。'
+          : `兼容性自检发现 ${report.problems.length} 项：${report.problems.join('；')}（详情见日志）`,
+      );
+    }),
   );
 
   context.subscriptions.push(
@@ -1649,7 +1681,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   void (async () => {
     try {
       const patchState = copilotPatchStatus();
-      log(`copilot patch: ${patchState.state}${patchState.file ? ` (${patchState.file})` : ''}`);
+      const copilotExt =
+        vscode.extensions?.getExtension?.('GitHub.copilot') || vscode.extensions?.getExtension?.('GitHub.copilot-chat');
+      log(
+        `compat: VS Code ${vscode.version || '?'} · Copilot ${
+          (copilotExt?.packageJSON as { version?: string } | undefined)?.version || '?'
+        } · 补丁 ${patchState.state}${patchState.file ? ` (${patchState.file})` : ''}`,
+      );
       if (patchState.state !== 'clean') {
         return;
       }
