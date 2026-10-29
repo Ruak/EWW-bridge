@@ -358,7 +358,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const cardTools = (config: ReturnType<typeof readConfig>, tools: string[]): string[] =>
     config.forwardTools ? tools : config.forwardProgress ? tools.slice(-3) : [];
 
+  /** 终稿底部：计时改写成“已完成 · Ns” */
+  const doneFooter = (elapsedMs?: number, extra?: string): string => {
+    const secs = elapsedMs && elapsedMs > 0 ? Math.max(1, Math.round(elapsedMs / 1000)) : 0;
+    return ['已完成', extra || '', secs ? `${secs}s` : ''].filter(Boolean).join(' · ');
+  };
+
+  // 飞书消息按发送时间排序：提问卡片必须真正发出后才能建 Copilot 卡片，否则 Copilot 会压在“你 · VS Code”上面
+  let pendingUserCard: Promise<unknown> | undefined;
+  const waitUserCard = (card: Promise<unknown> | undefined): Promise<unknown> | undefined => {
+    if (!card) {
+      return undefined;
+    }
+    const gate = card.catch(() => false);
+    pendingUserCard = gate;
+    void gate.then(() => {
+      if (pendingUserCard === gate) {
+        pendingUserCard = undefined;
+      }
+    });
+    return gate;
+  };
+
   const pushStreamCard = async (sessionId: string, chatId: string, cards: CardPair): Promise<TurnStream> => {
+    if (pendingUserCard) {
+      try {
+        await pendingUserCard;
+      } catch {
+        /* 提问卡片发送失败不影响处理卡片 */
+      }
+    }
     let state = activeStreams.get(sessionId);
     if (!state) {
       state = { sessionId, chatId, createFailures: 0, patches: 0, lastRendered: '', lastPatchAt: Date.now(), turnStartedAt: 0 };
@@ -531,16 +560,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   /** 收尾兜底：transcript 已静默且无在途工具，但始终没收到 turn_end（VS Code 漏写） */
   const finalizeSettledCard = async (state: TurnStream): Promise<void> => {
-    const config = readConfig();
     const answer = state.lastAnswerText ?? '';
     const cards = buildStreamingCards({
       title: 'Copilot',
-      tools: cardTools(config, state.lastTools ?? []),
+      tools: [],
       answer: answer || '（本轮没有文字输出）',
       expanded: false,
       showThinking: false,
       answerLimit: 12000,
-      footer: transcript?.elapsedMs ? `${Math.round((transcript.elapsedMs ?? 0) / 1000)}s` : '',
+      footer: doneFooter(transcript?.elapsedMs),
     });
     state.pendingTextLen = answer.length;
     state.softFinalText = answer;
@@ -642,16 +670,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         state.lastTools = event.tools;
         state.pendingTextLen = softAnswer.length;
       }
+      // 回合已停（无在途工具）→ 终稿外观：清掉“进行中”列表，底部显示已完成与总耗时
+      const stillRunning = transcript?.isTurnRunning() ?? false;
       const cards = buildStreamingCards({
         title: 'Copilot',
         thinking: config.forwardThinking ? event.thinking : '',
-        tools: cardTools(config, event.tools),
+        tools: stillRunning ? cardTools(config, event.tools) : [],
         answer: softAnswer || '（本轮没有文字输出）',
         expanded: false,
         showThinking: config.forwardThinking,
         thinkingLimit: 6000,
         answerLimit: 12000,
-        footer: transcript?.elapsedMs ? `${Math.round((transcript.elapsedMs ?? 0) / 1000)}s` : '',
+        footer: stillRunning ? '' : doneFooter(transcript?.elapsedMs),
       });
       if (state?.lastRendered === cards.v2) {
         return;
@@ -704,14 +734,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       const config = readConfig();
       const promptChatId = targetChatId();
-      // transcript 驱动模式下（chatSessions 残缺），占位卡必须在这里创建，否则新一轮没有卡片
-      if (
+      const needCard =
         config.forwardAssistant &&
         config.forwardStreaming &&
-        promptChatId &&
-        feishu?.started &&
-        !activeStreams.get(event.sessionId)?.messageId
-      ) {
+        !!promptChatId &&
+        !!feishu?.started &&
+        !activeStreams.get(event.sessionId)?.messageId;
+      // transcript 驱动模式下（chatSessions 残缺），占位卡必须在这里创建，否则新一轮没有卡片
+      const createPlaceholderCard = (): void => {
+        if (!needCard || !promptChatId) {
+          return;
+        }
         void pushStreamCard(
           event.sessionId,
           promptChatId,
@@ -729,35 +762,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             saveStreamState(event.sessionId, created.messageId, created.requestIndex, created.lastAnswerText);
           }
         });
-      }
-      if (!config.forwardUser) {
-        return;
-      }
-      if (event.text.startsWith('[Terminal ')) {
-        log('outbound: skip terminal notification prompt');
-        return;
-      }
-      if (consumeEcho(event.text)) {
-        return;
-      }
-      const chatId = targetChatId();
-      if (!chatId || !feishu?.started) {
-        return;
-      }
-      const normalized = normalize(event.text);
-      const mirroredAt = seenUserPrompts.get(normalized);
-      if (mirroredAt && Date.now() - mirroredAt < 120000) {
-        return;
-      }
-      seenUserPrompts.set(normalized, Date.now());
-      if (seenUserPrompts.size > 50) {
-        const oldest = seenUserPrompts.keys().next().value;
-        if (oldest) {
-          seenUserPrompts.delete(oldest);
+      };
+
+      // 提问卡片先发：飞书按发送时间排序，晚发就会出现“Copilot 卡片在‘你 · VS Code’上方”
+      let userCard: Promise<unknown> | undefined;
+      if (config.forwardUser) {
+        if (event.text.startsWith('[Terminal ')) {
+          log('outbound: skip terminal notification prompt');
+        } else if (consumeEcho(event.text)) {
+          // 注入回读：不镜像
+        } else if (promptChatId && feishu?.started) {
+          const normalized = normalize(event.text);
+          const mirroredAt = seenUserPrompts.get(normalized);
+          if (!(mirroredAt && Date.now() - mirroredAt < 120000)) {
+            seenUserPrompts.set(normalized, Date.now());
+            if (seenUserPrompts.size > 50) {
+              const oldest = seenUserPrompts.keys().next().value;
+              if (oldest) {
+                seenUserPrompts.delete(oldest);
+              }
+            }
+            log(`outbound: user prompt via transcript (${event.text.length}ch)`);
+            userCard = feishu.sendMarkdown(promptChatId, '你 · VS Code', event.text, 'grey', true);
+            waitUserCard(userCard);
+          }
         }
       }
-      log(`outbound: user prompt via transcript (${event.text.length}ch)`);
-      void feishu.sendMarkdown(chatId, '你 · VS Code', event.text, 'grey', true);
+      if (userCard) {
+        // 等提问卡片真正落到飞书之后再建 Copilot 卡片
+        void userCard.then(createPlaceholderCard, createPlaceholderCard);
+      } else {
+        createPlaceholderCard();
+      }
     };
 
     transcript.onDelta = (event) => {
@@ -969,7 +1005,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         seenUserPrompts.delete(normalized);
       } else if (!echoed && config.forwardUser) {
         log(`outbound: user request #${event.index} (${event.text.length}ch)`);
-        void feishu.sendMarkdown(chatId, '你 · VS Code', event.text, 'grey', true);
+        // 提问卡片先发，后续 pushStreamCard 会等它落库再建 Copilot 卡片
+        waitUserCard(feishu.sendMarkdown(chatId, '你 · VS Code', event.text, 'grey', true));
       }
       // 无论发没发都登记，保证 transcript 迟到时不会再发一张重复的提问卡
       seenUserPrompts.set(normalized, Date.now());
@@ -1068,9 +1105,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       const aborted = event.aborted === true;
       const modelShort = (event.modelId || '').split('/').pop() || '';
-      const elapsed =
-        typeof event.elapsedMs === 'number' && event.elapsedMs > 0 ? `${Math.round(event.elapsedMs / 1000)}s` : '';
-      const footer = [modelShort, elapsed].filter(Boolean).join(' · ');
+      const footer = doneFooter(event.elapsedMs, modelShort);
       const state = activeStreams.get(event.sessionId);
       // chatSessions 的终稿可能没有正文（正文只在 transcript / 软结束里），此时必须沿用已有的
       const carried = (state?.softFinalText ?? '').length >= (state?.lastAnswerText ?? '').length
@@ -1094,7 +1129,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const cards = buildStreamingCards({
         title: aborted ? 'Copilot · 已中断' : 'Copilot',
         thinking: config.forwardThinking ? event.thinking : '',
-        tools: cardTools(config, event.tools),
+        tools: waitingMore ? cardTools(config, event.tools) : [],
         answer: firstChunk,
         status: waitingMore
           ? '仍在处理…'

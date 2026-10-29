@@ -2,6 +2,15 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.0.27
+
+### 卡片顺序与终稿外观
+
+- **提问卡片先发**：飞书按发送时间排序，原来先建 Copilot 占位卡、后发“你 · VS Code”，导致 Copilot 卡片压在自己提问的上方。
+  现在 `pushStreamCard` 会等提问卡片真正发完（`pendingUserCard` 门闸，覆盖 transcript 与 chatSessions 两条路径）再建卡片。
+- **终稿清掉“进行中”**：软结束 / 收尾 / chatSessions 终稿都不再传工具列表（只有回合真在跑时才显示），
+  底部计时改为 `已完成 · Ns`（原来只写 `Ns`，容易被当成还在计时）。
+
 ## 1.0.26
 
 ### 修复：agent 会话最后一条（最终答复）不同步
