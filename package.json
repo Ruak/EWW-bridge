@@ -2,7 +2,7 @@
   "name": "eww-bridge",
   "displayName": "EWW Bridge — Copilot Chat to Feishu / Lark",
   "description": "Stream your active VS Code Copilot Chat session to a Feishu/Lark card in real time, and send new tasks from Feishu back into the same chat session.",
-  "version": "1.1.1",
+  "version": "1.1.5",
   "publisher": "huangdan",
   "license": "MIT",
   "icon": "assets/icon.png",
@@ -42,55 +42,55 @@
     "commands": [
       {
         "command": "ewwBridge.setCredentials",
-        "title": "EWW Bridge: 设置飞书应用凭据"
+        "title": "%command.setCredentials%"
       },
       {
         "command": "ewwBridge.connect",
-        "title": "EWW Bridge: 连接飞书"
+        "title": "%command.connect%"
       },
       {
         "command": "ewwBridge.disconnect",
-        "title": "EWW Bridge: 断开飞书"
+        "title": "%command.disconnect%"
       },
       {
         "command": "ewwBridge.showStatus",
-        "title": "EWW Bridge: 显示状态"
+        "title": "%command.showStatus%"
       },
       {
         "command": "ewwBridge.testSend",
-        "title": "EWW Bridge: 发送测试消息"
+        "title": "%command.testSend%"
       },
       {
         "command": "ewwBridge.setDefaultChat",
-        "title": "EWW Bridge: 设置默认推送会话"
+        "title": "%command.setDefaultChat%"
       },
       {
         "command": "ewwBridge.showLogs",
-        "title": "EWW Bridge: 显示日志"
+        "title": "%command.showLogs%"
       },
       {
         "command": "ewwBridge.dumpCurrentSession",
-        "title": "EWW Bridge: 解析当前会话(调试)"
+        "title": "%command.dumpCurrentSession%"
       },
       {
         "command": "ewwBridge.followLatestSession",
-        "title": "EWW Bridge: 跟随最新会话（新开对话后不同步时用）"
+        "title": "%command.followLatestSession%"
       },
       {
         "command": "ewwBridge.injectTest",
-        "title": "EWW Bridge: 模拟飞书下发(注入当前会话)"
+        "title": "%command.injectTest%"
       },
       {
         "command": "ewwBridge.patchCopilotFlush",
-        "title": "EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）"
+        "title": "%command.patchCopilotFlush%"
       },
       {
         "command": "ewwBridge.restoreCopilotFlush",
-        "title": "EWW Bridge: 还原内置 Copilot 落盘补丁"
+        "title": "%command.restoreCopilotFlush%"
       },
       {
         "command": "ewwBridge.compatCheck",
-        "title": "EWW Bridge: 兼容性自检（VS Code 升级后用）"
+        "title": "%command.compatCheck%"
       }
     ],
     "configuration": {
@@ -99,67 +99,67 @@
         "ewwBridge.copilotExtensionFile": {
           "type": "string",
           "default": "",
-          "description": "内置 Copilot 的 extension.js 路径（留空自动探测）。仅在自动探测失败或提示锚点不匹配时手动指定。"
+          "description": "%config.copilotExtensionFile%"
         },
         "ewwBridge.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "启用桥接（需要配置 App ID/Secret 后才会连接飞书）"
+          "description": "%config.enabled%"
         },
         "ewwBridge.feishu.appId": {
           "type": "string",
           "default": "",
-          "description": "飞书自建应用 App ID（App Secret 通过命令写入密钥库）"
+          "description": "%config.feishu.appId%"
         },
         "ewwBridge.feishu.defaultChatId": {
           "type": "string",
           "default": "",
-          "description": "默认推送的飞书会话 ID（oc_ 开头）。留空时会在收到白名单用户消息后自动记忆。"
+          "description": "%config.feishu.defaultChatId%"
         },
         "ewwBridge.forward.userMessages": {
           "type": "boolean",
           "default": true,
-          "description": "把你在 VS Code 里的提问同步到飞书"
+          "description": "%config.forward.userMessages%"
         },
         "ewwBridge.forward.assistantMessages": {
           "type": "boolean",
           "default": true,
-          "description": "把助手最终回答同步到飞书"
+          "description": "%config.forward.assistantMessages%"
         },
         "ewwBridge.forward.toolCalls": {
           "type": "boolean",
           "default": false,
-          "description": "在回答前附带工具调用摘要"
+          "description": "%config.forward.toolCalls%"
         },
         "ewwBridge.forward.progress": {
           "type": "boolean",
           "default": true,
-          "description": "显示紧凑的进行中提示（如正在编辑某个文件），代替代码内容"
+          "description": "%config.forward.progress%"
         },
         "ewwBridge.forward.thinking": {
           "type": "boolean",
           "default": false,
-          "description": "同步思考过程（默认不发，减少卡片体积与推流延迟）"
+          "description": "%config.forward.thinking%"
         },
         "ewwBridge.forward.streaming": {
           "type": "boolean",
           "default": true,
-          "description": "实时输出：先发占位卡片，思考/工具/回答增量更新同一张卡片"
+          "description": "%config.forward.streaming%"
         },
         "ewwBridge.forward.streamingIntervalMs": {
           "type": "number",
           "default": 500,
-          "description": "流式卡片的最小更新间隔（毫秒），越小越实时，过小可能触发飞书限频"
+          "description": "%config.forward.streamingIntervalMs%"
         },
         "ewwBridge.forward.patchStreamText": {
           "type": "boolean",
           "default": true,
-          "description": "从 chatSessions 补丁流提前叠加正文（仅在卡片已有正文且前缀一致时叠加，不会串段；可关闭）"
+          "description": "%config.forward.patchStreamText%"
         },
         "ewwBridge.forward.idleMs": {
           "type": "number",
           "default": 2500,
-          "description": "回答静默多少毫秒后视为一轮结束并推送"
+          "description": "%config.forward.idleMs%"
         },
         "ewwBridge.security.allowedOpenIds": {
           "type": "array",
@@ -167,22 +167,22 @@
             "type": "string"
           },
           "default": [],
-          "description": "允许下发任务的飞书用户 open_id 白名单。为空时拒绝所有入站消息，并回复你的 open_id 便于加入。"
+          "description": "%config.security.allowedOpenIds%"
         },
         "ewwBridge.security.prefix": {
           "type": "string",
           "default": "",
-          "description": "入站口令前缀（如 #ai）。留空表示不需要前缀，仍受白名单保护。"
+          "description": "%config.security.prefix%"
         },
         "ewwBridge.inject.newChat": {
           "type": "boolean",
           "default": false,
-          "description": "true 时每条飞书任务新开一个会话；false 追加到当前会话"
+          "description": "%config.inject.newChat%"
         },
         "ewwBridge.inject.timeoutMs": {
           "type": "number",
           "default": 900000,
-          "description": "单条任务等待完成的最长时间（毫秒），超时后继续处理队列"
+          "description": "%config.inject.timeoutMs%"
         }
       }
     }
@@ -190,7 +190,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
-    "test": "node test/card.js && node test/parser.js && node test/transcript.js && node test/agent-task-complete.js && node test/copilot-patch.js && node test/copilot-anchors.js && node test/compat.js && node test/smoke.js && node test/replay-floor.js && node test/partial.js && node test/instance.js && node test/activate.js",
+    "test": "node test/card.js && node test/parser.js && node test/transcript.js && node test/transcript-session-id.js && node test/agent-task-complete.js && node test/copilot-patch.js && node test/copilot-anchors.js && node test/compat.js && node test/nls.js && node test/smoke.js && node test/replay-floor.js && node test/partial.js && node test/instance.js && node test/activate.js",
     "package": "vsce package",
     "publish": "vsce publish"
   },

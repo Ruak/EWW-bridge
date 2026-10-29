@@ -27,6 +27,8 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 | | |
 |---|---|
 | Live streaming | Card patched in place, one in-flight API call per card (latest frame wins) |
+| One card per question | A turn owns exactly one card; stray placeholders are recycled instead of staying at `进行中…` |
+| Deterministic card state | Title/footer follow the whole turn: `处理中…` while running, `已完成 · Ns` only at the end, `已停止` when cancelled in VS Code — tool steps never flip it back and forth |
 | Bidirectional | Feishu → current chat session, with an injection queue |
 | Progress hints | Tool activity shown as plain-language lines (`正在编辑文件`, `正在执行命令` …) |
 | Interruption aware | Automatically releases the queue when a turn is cancelled by VS Code |
@@ -142,7 +144,7 @@ versions, patch state, session directories, event-type counts and a one-line ver
 |---|---|
 | any text | Injected into the current chat session |
 | `/status` | Bridge + session status |
-| `/stop` | Cancel the running turn |
+| `/stop` | Cancel the running turn (the card ends as `Copilot · 已停止`) |
 | `/new` | Start a new chat session |
 | `/clear` | Drop queued (not running) tasks |
 | `/help` | Command list |
@@ -169,6 +171,14 @@ versions, patch state, session directories, event-type counts and a one-line ver
 
 See `settings.example.jsonc`.
 
+## Localization
+
+- **Extension UI follows VS Code's display language**: command titles and setting descriptions ship in
+  English (`package.nls.json`, default) and Simplified Chinese (`package.nls.zh-cn.json`).
+- **Feishu card labels stay Chinese** (`Copilot · 处理中…`, `已完成 · Ns`, `Copilot · 已停止` …) so a card looks
+  the same for every teammate in the chat — see [Card state](#card-state-title-and-footer).
+- Logs stay Chinese to match the existing troubleshooting guide.
+
 ## Rendering mapping (VS Code → Feishu card)
 
 | Markdown | Feishu card |
@@ -184,6 +194,21 @@ See `settings.example.jsonc`.
 
 Cards are capped at 24 KB of UTF-8 JSON and shrink automatically to stay under Feishu limits.
 
+### Card state (title and footer)
+
+Card labels are Chinese, matching the VS Code UI language used by the bridge:
+
+| Stage | Card shows |
+|---|---|
+| Turn running | title `Copilot · 处理中…` plus a status line (`正在执行 view：src/app.ts`, `进行中…（已等待 42s）`, …) |
+| Turn finished | title `Copilot`, footer `已完成 · 42s` |
+| Stopped in VS Code | title `Copilot · 已停止`, footer `已停止 · 12s`; text produced so far is kept |
+| Interrupted by a new prompt | title `Copilot · 已中断` (best effort — only when the card has been idle ≥15 s; otherwise the previous card is simply released) |
+
+The title/footer are derived from *the turn as a whole*, not from individual model steps:
+`assistant.turn_end` fires after **every** model message, so per-step rendering used to flip
+the card between “in progress” and “done” on every tool call.
+
 ## Security & privacy
 
 - App secret is stored with VS Code **SecretStorage**, never in settings or logs.
@@ -195,6 +220,8 @@ Cards are capped at 24 KB of UTF-8 JSON and shrink automatically to stay under F
 
 - **Not connected**: check the log (`EWW Bridge: 显示日志`), app published, long connection enabled, `im.message.receive_v1` subscribed.
 - **No cards**: ensure a default chat id is set and the bot is in that chat.
+- **Two cards for one question**: one turn must own exactly one card. If an extra card is stuck at `进行中…（已等待 Ns）` next to a finished answer, an older build mixed the agent-session id (`events`) with the chat-session id — upgrade to 1.1.2 or later and reload the window.
+- **Card stuck at `进行中…` after stopping**: cancelling a turn right after sending produces an `abort` event with no assistant text. 1.1.4+ finalizes that card as `Copilot · 已停止`; older builds left it running forever — upgrade and reload.
 - **Slow updates**: model first-token latency dominates (can be tens of seconds); the card shows `已等待 Ns…` heartbeats meanwhile. Feishu patch round-trip is ~0.6–1.2 s.
 - **Truncated look**: oversized cards shrink automatically; the footer shows model and elapsed time.
 
@@ -250,10 +277,19 @@ VS Code 把 Copilot 的会话记录缓存在内存里，要等下一条事件才
 **行为说明**
 
 - 每条提问先发占位卡，回答边生成边更新同一张卡
+- **卡片状态**（标题/底部只由“整轮”决定，不看单步事件）：
+  - 整轮进行中：`Copilot · 处理中…` + 状态行（`正在执行 view：src/app.ts`、`进行中…（已等待 42s）` 等）
+  - 整轮结束：`Copilot` + `已完成 · 42s`
+  - 在 VS Code 侧停止：`Copilot · 已停止` + `已停止 · 12s`（已产出的正文保留）
+  - 被新消息打断：`Copilot · 已中断`（尽力而为：仅当卡片已静默 ≥15s 才会改写，否则直接释放上一张卡）
+  - `assistant.turn_end` 是**每条模型消息**结束时都会触发的事件，所以工具调用的每一步结束都不会把卡片刷成“已完成”
+- 同一次提问永远只有一张卡片：会话标识发生变化时会回收遗留的空占位卡，不会留下一直显示“进行中”的多余卡片
 - 默认不转发思考过程；`forward.thinking: true` 可开启折叠面板
 - 代码块统一变成「〔代码 N 行已省略〕」，空代码块（编辑占位）直接丢弃
 - 卡片超过 24KB 会自动缩容，避免飞书 400/500
 - 同一提问只投递一次，不会因自动重投产生重复消息
+- 插件命令与设置说明跟随 VS Code 显示语言：英文（默认）与简体中文各一份（`package.nls.json` / `package.nls.zh-cn.json`）；
+  飞书卡片文案与日志固定中文
 
 ## License
 

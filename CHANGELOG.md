@@ -2,6 +2,78 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+> **English summary (1.1.2 – 1.1.5)** — card lifecycle + English UI:
+> ① **one question = one card**: agent sessions used to derive the session id from `events.jsonl`,
+> creating a second card keyed `events` that never received content and stayed at `进行中`;
+> ② **deterministic card state**: the title/footer follow the whole turn (`处理中…` while running,
+> `已完成 · Ns` only at the end) instead of flipping on every model step;
+> ③ **stop-aware**: cancelling a turn in VS Code right after sending now finalizes the card as
+> `Copilot · 已停止` instead of leaving it stuck;
+> ④ **localized UI**: command titles and setting descriptions follow VS Code's display language
+> (English default, Simplified Chinese via `package.nls.zh-cn.json`). Card labels stay Chinese — see
+> README → “Card state”.
+
+## 1.1.5 — 英文适配（VS Code 本地化）
+
+### 新增
+
+- **命令标题与设置说明跟随 VS Code 显示语言**：`package.nls.json`（英文，默认）+ `package.nls.zh-cn.json`（简体中文）。
+  英文环境下命令面板、设置页不再显示中文；中文环境保持原文案。
+- 新增 `test/nls.js`：校验 `package.json` 的所有 `%key%` 占位符在两种语言中都存在且非空、键集合一致
+  （防止发布后命令面板出现 `%key%`），已接入 `npm test`。
+
+### 说明
+
+- 飞书卡片文案（`Copilot · 处理中…`、`已完成 · Ns`、`Copilot · 已停止` 等）保持中文，见 README「Card state」。
+- 运行时日志保持中文，与既有排障流程一致。
+
+## 1.1.4 — 修复“发出后立刻停止，飞书卡片卡死”
+
+### 修复
+
+- **在 VS Code 侧发送消息后马上停止，飞书卡片永远停在“处理中”**：
+  agent 会话停止时的事件流是 `assistant.turn_start → abort{reason:"user_initiated"} → assistant.turn_end`，
+  一条正文都没有。旧逻辑的软收尾在“没有正文”时直接返回（避免思考期误收尾），
+  心跳收尾又要求已有正文，于是卡片再没有任何机会定稿。
+  - `TranscriptWatcher` 识别 `abort` 事件：清掉在途工具、按整轮结束处理，
+    即使没有任何正文也发出带 `aborted` 标记的软收尾。
+  - 出站把它渲染成 `Copilot · 已停止`、底部 `已停止 · Ns`（有部分正文就保留正文），
+    并立即定稿，迟到事件不会再把它改回“处理中”。
+  - 停止时若卡片还在创建中（刚发出就停），建卡完成后会补一次 patch，不再把占位内容当成已渲染。
+- `test/transcript.js` 新增停止用例（无正文也必须软收尾并标记 aborted）。
+
+## 1.1.3 — 修复卡片“进行中 / 已完成”反复
+
+### 修复
+
+- **一次提问的卡片在多步执行中来回切标题**：`assistant.turn_end` 是**每条模型消息**结束时都会触发的事件，
+  而软收尾把“上一步的 turn_end + 800ms 静默”当成整轮结束。于是每步之后卡片都会短暂变成
+  `Copilot` + `已完成 · Ns`，下一步正文一到又变回 `Copilot · 处理中…`（实测步骤间隔常有 3s+）。
+  - `TranscriptWatcher`：`assistant.turn_start` 会清掉上一步的 `turn_end` 标记；
+    `maybeSoftFinal` 在“上一步结束后已经开了新的一步”时拒绝软收尾。
+  - 出站渲染统一由 `runningLook()` 决定外观：增量、软收尾、工具事件三个入口
+    只在**整轮还在跑**时用“处理中 + 状态行”，整轮结束才写“已完成 · Ns”，不再按事件类型各自为政。
+  - 后台命令的迟到事件在回合已收尾后不再把卡片刷回“处理中”。
+- `test/transcript.js` 新增多步回合计例（下一步已开始不得软收尾、两步之间必须仍算运行中、真正结束必须软收尾）。
+
+## 1.1.2 — 修复偶发的“额外进行中卡片”
+
+### 修复
+
+- **同一次提问出现两张 Copilot 卡片，其中一张永远停在 `进行中…（已等待 Ns）`**：
+  agent 会话（`~/.copilot/session-state/<id>/events.jsonl`）的会话 id 之前取的是**文件名**，
+  于是被解析成无意义的 `events`；而注入时建的占位卡用的是 `chatSessions` 的会话 id。
+  两个键各建一张卡，`events` 之外那张再也收不到正文，心跳就一直刷“进行中”。
+  - `TranscriptWatcher` 按数据源布局取 id：`session-state` 取父目录名，`flat` 仍取文件名。
+    `isAgentSession` 也改为看布局，不再依赖路径字符串（Windows 反斜杠/目录联接都安全）。
+  - 出站卡片统一用 `outboundSessionId()`：优先 transcript 的当前会话 id，
+    注入占位卡、后台命令状态、重载恢复全部对齐，不再各建一张。
+  - 兜底回收：建新卡或心跳发现会话键已切换时，把遗留的**空占位卡**收成终态；
+    已有正文的旧卡按现有正文收尾，不会无限“进行中”。
+  - agent 会话重载恢复不再借用 `chatSessions` 的 `startedMidTurn` 与历史重放
+    （那份文件属于另一个聊天，会把别人的正文写进这张卡）。
+- 新增 `test/transcript-session-id.js`（session-state 会话 id 与提问/增量回调一致性）。
+
 ## 1.1.1 — VS Code 升级后的自适应与自检
 
 ### 新增
