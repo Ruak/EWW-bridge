@@ -270,8 +270,9 @@ export class SessionWatcher {
           const cur = fs.statSync(this.file);
           const next = fs.statSync(active);
           currentFresh = Date.now() - cur.mtimeMs < 120000;
-          // 新建会话的判定：候选文件的创建时间晚于当前文件的最后一次写入
-          createdNewer = next.birthtimeMs > cur.mtimeMs + 1000;
+          // 新建会话的判定：候选文件创建时间晚于当前文件的最后写入，
+          // 或明显更晚创建（旧会话还在被旧回合写入时也要能切到新对话）
+          createdNewer = next.birthtimeMs > cur.mtimeMs + 1000 || next.birthtimeMs > cur.birthtimeMs + 60000;
         } catch {
           currentFresh = false;
         }
