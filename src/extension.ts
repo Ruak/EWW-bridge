@@ -169,6 +169,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     chatId: string;
     messageId?: string;
     creating?: Promise<string | undefined>;
+    /** 正在创建的那张卡片的渲染内容（用于判断建卡期间是否已产生更新的帧） */
+    creatingV2?: string;
     createFailures: number;
     patches: number;
     lastRendered: string;
@@ -197,6 +199,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   }
   const activeStreams = new Map<string, TurnStream>();
   const finalized = new Map<string, string>();
+  /**
+   * 出站卡片的状态键：agent 会话期间 chatSessions 属于另一个聊天（甚至是另一段会话 id），
+   * 必须和 transcript 用同一个键，否则同一次提问会建出两张卡，另一张永远停在“进行中”。
+   */
+  const outboundSessionId = (): string =>
+    transcript?.currentSessionId || watcher?.getStatus().sessionId || '';
   const STREAM_STATE_KEY = 'ewwBridge.streamCard';
   /** 卡片正文最多持久化这么多字符（与卡片 answerLimit 一致） */
   const PERSIST_TEXT_MAX = 12000;
@@ -232,13 +240,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // 重载时恢复未完成的流式卡片，避免另开一张卡导致"内容被截断"
   let pendingReplayIndex: number | undefined;
   const restored = context.workspaceState.get<PersistedStream>(STREAM_STATE_KEY);
-  if (restored && watcher?.getStatus().sessionId !== restored.sessionId) {
+  if (restored && outboundSessionId() !== restored.sessionId) {
     log(
-      `outbound: 跳过卡片恢复（会话不匹配 ${restored.sessionId.slice(0, 8)} vs ${watcher?.getStatus().sessionId.slice(0, 8) || '-'}）`,
+      `outbound: 跳过卡片恢复（会话不匹配 ${restored.sessionId.slice(0, 8)} vs ${outboundSessionId().slice(0, 8) || '-'}）`,
     );
   }
-  if (restored && watcher?.getStatus().sessionId === restored.sessionId) {
-    if (watcher?.startedMidTurn) {
+  if (restored && outboundSessionId() === restored.sessionId) {
+    // agent 会话下 chatSessions 属于另一个聊天：既不能借它的 startedMidTurn，也不能重放它的结果
+    const agentSession = !!transcript?.isAgentSession;
+    if (agentSession || watcher?.startedMidTurn) {
       activeStreams.set(restored.sessionId, {
         chatId: targetChatId() || '',
         sessionId: restored.sessionId,
@@ -254,7 +264,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         answerFloorLen: restored.answerLen,
       });
       log(
-        `outbound: 恢复上次的流式卡片 ${restored.messageId} (request #${restored.requestIndex ?? '?'}, 已渲染 ${restored.answerLen ?? 0}ch)`,
+        `outbound: 恢复上次的流式卡片 ${restored.messageId} (request #${restored.requestIndex ?? '?'}, 已渲染 ${restored.answerLen ?? 0}ch${agentSession ? '，agent 会话' : ''})`,
       );
     } else {
       // 回合可能刚好在重载前结束，但上次实例没来得及定稿：重放最后一条结果补全同一张卡
@@ -362,10 +372,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const cardTools = (config: ReturnType<typeof readConfig>, tools: string[]): string[] =>
     config.forwardTools ? tools : config.forwardProgress ? tools.slice(-3) : [];
 
-  /** 终稿底部：计时改写成“已完成 · Ns” */
-  const doneFooter = (elapsedMs?: number, extra?: string): string => {
+  /** 终稿底部：计时改写成“已完成 · Ns”（用户停止时用“已停止”） */
+  const doneFooter = (elapsedMs?: number, extra?: string, label = '已完成'): string => {
     const secs = elapsedMs && elapsedMs > 0 ? Math.max(1, Math.round(elapsedMs / 1000)) : 0;
-    return ['已完成', extra || '', secs ? `${secs}s` : ''].filter(Boolean).join(' · ');
+    return [label, extra || '', secs ? `${secs}s` : ''].filter(Boolean).join(' · ');
+  };
+
+  /**
+   * 卡片外观只由“整轮是否还在跑”决定，与这一帧来自增量 / 软收尾 / 工具事件无关：
+   * 每步工具调用的 turn_end 不是整轮结束，按事件类型决定标题会让卡片在“处理中/已完成”之间反复。
+   */
+  const runningLook = (): { running: boolean; title: string; footer: string } => {
+    const running = transcript?.isTurnRunning() ?? false;
+    return {
+      running,
+      title: running ? 'Copilot · 处理中…' : 'Copilot',
+      footer: running ? '' : doneFooter(transcript?.elapsedMs),
+    };
   };
 
   // 飞书消息按发送时间排序：提问卡片必须真正发出后才能建 Copilot 卡片，否则 Copilot 会压在“你 · VS Code”上面
@@ -384,6 +407,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return gate;
   };
 
+  /**
+   * 同一聊天里为不同会话键留下的空占位卡：另一个键再也收不到正文，
+   * 不处理就会一直显示“进行中”。建新卡或心跳发现键已切换时，把它收成终态。
+   */
+  const retireOrphanPlaceholders = (chatId: string, keepSessionId: string): void => {
+    for (const [key, other] of activeStreams) {
+      if (key === keepSessionId || other.chatId !== chatId || other.doneAt || !other.messageId) {
+        continue;
+      }
+      if ((other.lastAnswerText ?? '').trim() || other.softFinalText) {
+        continue;
+      }
+      stopHeartbeat(key);
+      activeStreams.delete(key);
+      log(
+        `outbound: 回收空占位卡 #${other.messageId.slice(-8)}（会话键 ${key.slice(0, 8)} 已被 ${keepSessionId.slice(0, 8)} 取代）`,
+      );
+      void feishu
+        ?.patchCardPair(
+          other.messageId,
+          buildStreamingCards({
+            title: 'Copilot',
+            answer: '本轮的输出已转到新的卡片继续（会话标识变化）。',
+            expanded: false,
+            showThinking: false,
+            footer: doneFooter(),
+          }),
+        )
+        .catch((error) => logError('outbound retire placeholder failed', error));
+    }
+  };
+
   const pushStreamCard = async (sessionId: string, chatId: string, cards: CardPair): Promise<TurnStream> => {
     if (pendingUserCard) {
       try {
@@ -394,20 +449,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }
     let state = activeStreams.get(sessionId);
     if (!state) {
-      state = { sessionId, chatId, createFailures: 0, patches: 0, lastRendered: '', lastPatchAt: Date.now(), turnStartedAt: 0 };
+      state = {
+        sessionId,
+        chatId,
+        createFailures: 0,
+        patches: 0,
+        lastRendered: '',
+        lastPatchAt: Date.now(),
+        turnStartedAt: 0,
+      };
       activeStreams.set(sessionId, state);
       log(`outbound: stream card for ${sessionId.slice(0, 8)}`);
+      retireOrphanPlaceholders(chatId, sessionId);
     }
     if (!state.messageId && !state.creating && feishu?.started && state.createFailures < 3) {
+      state.creatingV2 = cards.v2;
       state.creating = feishu.sendCardPair(chatId, cards);
     }
     if (state.creating) {
       const messageId = await state.creating;
+      const createdV2 = state.creatingV2 ?? '';
       state.creating = undefined;
+      state.creatingV2 = undefined;
       state.messageId = messageId;
       if (!messageId) {
         state.createFailures += 1;
         log(`outbound: 卡片创建失败（第 ${state.createFailures} 次）`);
+      } else if (createdV2 !== cards.v2) {
+        // 建卡期间又来了更新的帧（例如刚发出就停止）：创建时写的是旧内容，必须补一次 patch
+        log('outbound: 建卡期间内容已变化，补一次 patch');
+        await patchStreamCard(state, cards);
+        startHeartbeat(sessionId);
       } else {
         state.lastRendered = cards.v2;
         state.patches = 1;
@@ -505,6 +577,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         stopHeartbeat(sessionId);
         return;
       }
+      // 会话键已经切到别处（agent 会话/换会话）：这张卡再也收不到正文，收成终态别一直“进行中”。
+      // 只在新的键确实有事件在写时才动手，避免两个源 mtime 抖动造成的误收尾。
+      const currentKey = outboundSessionId();
+      const keySwitched =
+        !!currentKey && currentKey !== sessionId && Date.now() - (transcript?.lastActivity ?? 0) < 30000;
+      if (keySwitched) {
+        if (state.softFinalText || (state.lastAnswerText ?? '').trim()) {
+          void finalizeSettledCard(state);
+          return;
+        }
+        retireOrphanPlaceholders(state.chatId, currentKey);
+        if (!activeStreams.has(sessionId)) {
+          return;
+        }
+      }
       const running = transcript?.activeTools() ?? [];
       const top = running[running.length - 1];
       // 已软结束且没有在执行的工具：保持终稿外观，不再刷心跳
@@ -564,7 +651,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   /** 收尾兜底：transcript 已静默且无在途工具，但始终没收到 turn_end（VS Code 漏写） */
   const finalizeSettledCard = async (state: TurnStream): Promise<void> => {
-    const answer = state.lastAnswerText ?? '';
+    const answer = pickLonger(state.lastAnswerText ?? '', state.softFinalText ?? '');
     const cards = buildStreamingCards({
       title: 'Copilot',
       tools: [],
@@ -588,12 +675,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // 后台命令开始/结束：立刻在卡片上体现状态，避免长时间显示“处理中”
   terminalWatch.onChanged = (activity, exitCode) => {
-    const sessionId = watcher?.getStatus().sessionId;
+    const sessionId = outboundSessionId();
     if (!sessionId) {
       return;
     }
     const state = activeStreams.get(sessionId);
     if (!state?.messageId || state.doneAt) {
+      return;
+    }
+    if (state.softFinalText && !transcript?.isTurnRunning()) {
+      // 回合已收尾：后台命令的迟到事件不能再把卡片刷回“处理中”
       return;
     }
     const cards = buildStreamingCards({
@@ -656,13 +747,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const state = activeStreams.get(event.sessionId);
+      const aborted = event.aborted === true;
       const softAnswer0 = mergedAnswer(event.text, state?.requestIndex);
-      if (!softAnswer0.trim()) {
+      if (!softAnswer0.trim() && !aborted) {
         // 只有思考/工具、还没正文：保持“处理中”，不要把卡片收尾成“没有文字输出”
         return;
       }
-      const softAnswer = pickLonger(softAnswer0, state?.lastAnswerText ?? '');
-      if (regressedAnswer(state, softAnswer)) {
+      if (aborted && !state?.messageId && !state?.creating) {
+        // 没有卡片可收尾（例如重载后回看到一条早就停止的旧回合）：不要为它新建卡
+        log('outbound: 停止的回合没有对应卡片，跳过');
+        return;
+      }
+      const softAnswer = aborted ? softAnswer0 : pickLonger(softAnswer0, state?.lastAnswerText ?? '');
+      if (!aborted && regressedAnswer(state, softAnswer)) {
         return;
       }
       if (state) {
@@ -671,21 +768,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         state.softFinalText = softAnswer;
         state.lastAnswerText = softAnswer;
-        state.lastTools = event.tools;
+        state.lastTools = [];
         state.pendingTextLen = softAnswer.length;
+        if (aborted) {
+          // 用户已经停止：卡片定稿，后续迟到的事件不能再把它改回“处理中”
+          state.doneAt = Date.now();
+          stopHeartbeat(event.sessionId);
+        }
       }
-      // 回合已停（无在途工具）→ 终稿外观：清掉“进行中”列表，底部显示已完成与总耗时
-      const stillRunning = transcript?.isTurnRunning() ?? false;
+      // 外观只看整轮是否还在跑：软收尾只是正文快照，不能把仍在进行的回合画成“已完成”
+      const look = runningLook();
       const cards = buildStreamingCards({
-        title: 'Copilot',
+        title: aborted ? 'Copilot · 已停止' : look.title,
         thinking: config.forwardThinking ? event.thinking : '',
-        tools: stillRunning ? cardTools(config, event.tools) : [],
-        answer: softAnswer || '（本轮没有文字输出）',
+        tools: aborted || !look.running ? [] : cardTools(config, event.tools),
+        answer: softAnswer || (aborted ? '（本轮已停止，未产生文字输出）' : '（本轮没有文字输出）'),
+        status: aborted || !look.running ? '' : '本步已输出，等待 Copilot 继续…',
         expanded: false,
         showThinking: config.forwardThinking,
         thinkingLimit: 6000,
         answerLimit: 12000,
-        footer: stillRunning ? '' : doneFooter(transcript?.elapsedMs),
+        footer: aborted ? doneFooter(transcript?.elapsedMs, '', '已停止') : look.footer,
       });
       if (state?.lastRendered === cards.v2) {
         return;
@@ -697,7 +800,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             const ok = state.lastRendered === cards.v2;
             log(`outbound: soft finalize ${ok ? 'ok' : 'FAIL'} #${state.messageId.slice(-8)} (${cards.v2.length}ch)`);
           } else {
-            await pushStreamCard(event.sessionId, chatId, cards);
+            const created = await pushStreamCard(event.sessionId, chatId, cards);
+            if (aborted) {
+              created.doneAt = Date.now();
+              stopHeartbeat(event.sessionId);
+            }
             log('outbound: soft finalize created card');
           }
         } catch (error) {
@@ -825,14 +932,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (regressedAnswer(existing, answer)) {
             return;
           }
+          const look = runningLook();
           const cards = buildStreamingCards({
-            title: 'Copilot · 处理中…',
+            title: look.title,
             thinking: config.forwardThinking ? event.thinking : '',
             answer,
-            tools: cardTools(config, event.tools),
-            status: '正在输出…',
+            tools: look.running ? cardTools(config, event.tools) : [],
+            status: look.running ? '正在输出…' : '',
             expanded: false,
             showThinking: config.forwardThinking,
+            footer: look.footer,
           });
           if (existing) {
             existing.lastAnswerText = answer;
@@ -866,15 +975,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         // 已渲染的正文比当前快照长：不回退，只保留心跳
         return;
       }
+      const look = runningLook();
       const cards = buildStreamingCards({
-        title: state.softFinalText ? 'Copilot' : 'Copilot · 处理中…',
-        tools: state.lastTools ?? [],
+        title: look.title,
+        tools: look.running ? (state.lastTools ?? []) : [],
         answer: toolAnswer,
-        status: activity
-          ? `正在执行 ${activity.name}${activity.detail ? `：${activity.detail}` : ''}`
-          : '工具执行完成，处理中…',
+        status: look.running
+          ? activity
+            ? `正在执行 ${activity.name}${activity.detail ? `：${activity.detail}` : ''}`
+            : '工具执行完成，处理中…'
+          : '',
         expanded: false,
         showThinking: false,
+        footer: look.footer,
       });
       void (async () => {
         try {
@@ -1280,7 +1393,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // 出站处理器已就绪：补全重载前未定稿的卡片
   if (pendingReplayIndex !== undefined) {
-    if (watcher?.partialState) {
+    if (transcript?.isAgentSession) {
+      // agent 会话期间 chatSessions 属于另一个聊天，重放会把别人的正文写进这张卡
+      log('outbound: agent 会话，跳过 chatSessions 历史重放');
+    } else if (watcher?.partialState) {
       // 残缺尾部里的“最后一条”很可能是几小时前的旧请求，重放会往卡片里塞无关内容
       log('outbound: chatSessions 为残缺尾部，跳过历史重放');
     } else {
@@ -1379,7 +1495,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void reply(busyNow ? '已排队：当前回合还在运行，结束后会自动执行本条。' : '已提交到 VS Code 当前会话。');
         if (config.forwardAssistant && config.forwardStreaming && feishu?.started) {
           const streamChatId = targetChatId();
-          const sessionId = watcher?.getStatus().sessionId;
+          // 必须和 transcript 的会话键一致：用 chatSessions 的 id 会在 agent 会话下另建一张永不更新的卡
+          const sessionId = outboundSessionId();
           if (streamChatId && sessionId) {
             const previous = activeStreams.get(sessionId);
             if (previous?.doneAt) {

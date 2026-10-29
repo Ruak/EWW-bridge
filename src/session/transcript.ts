@@ -7,6 +7,8 @@ export interface StreamDelta {
   thinking: string;
   text: string;
   tools: string[];
+  /** 本轮被用户停止（agent 会话的 abort 事件）：没有正文也必须收尾，否则卡片会永远停在“处理中” */
+  aborted?: boolean;
 }
 
 /** 正在执行的工具（用于卡片显示“正在执行 xxx（已 Ns）”） */
@@ -50,6 +52,8 @@ export class TranscriptWatcher {
   private emitCount = 0;
   private userPrompts = 0;
   private active = false;
+  /** 当前跟随的事件源布局（flat transcript / agent session-state） */
+  private layout: TranscriptSource['layout'] = 'flat';
 
   /** 最小推送间隔，由扩展按设置更新 */
   partialIntervalMs = 500;
@@ -61,6 +65,8 @@ export class TranscriptWatcher {
   private turnEndedAt = 0;
   private softFinalSent = false;
   private settledAt = 0;
+  /** 本轮被用户停止时的原因（agent 会话 abort 事件）；空串表示没有停止 */
+  private abortReason = '';
   /** 已看到 turn_start/user.message，但还没等到 turn_end */
   private turnOpen = false;
   /** 本任务（一次提问）的开始时间与耗时（turn_end 时结算） */
@@ -122,7 +128,7 @@ export class TranscriptWatcher {
 
   /** 当前是否在跟随 agent 会话（~/.copilot/session-state），此时 chatSessions 属于别的聊天，不能混用 */
   get isAgentSession(): boolean {
-    return !!this.file && this.file.replace(/\\/g, '/').includes('/.copilot/session-state/');
+    return this.layout === 'session-state';
   }
 
   /** 本轮是否已真正落定（turn_end 后静默超过阈值），仅作辅助信号 */
@@ -191,6 +197,7 @@ export class TranscriptWatcher {
     this.turnOpen = false;
     this.turnStartedAt = 0;
     this.lastElapsedMs = 0;
+    this.abortReason = '';
   }
 
   private poll(): void {
@@ -199,8 +206,8 @@ export class TranscriptWatcher {
       if (!newest) {
         return;
       }
-      if (newest !== this.file) {
-        this.attach(newest);
+      if (newest.file !== this.file) {
+        this.attach(newest.file, newest.layout);
         return;
       }
       this.readAppended();
@@ -212,8 +219,8 @@ export class TranscriptWatcher {
     }
   }
 
-  private findNewest(): string | undefined {
-    let best: { file: string; mtime: number } | undefined;
+  private findNewest(): { file: string; layout: TranscriptSource['layout'] } | undefined {
+    let best: { file: string; layout: TranscriptSource['layout']; mtime: number } | undefined;
     for (const source of this.sources) {
       let entries: fs.Dirent[];
       try {
@@ -227,7 +234,7 @@ export class TranscriptWatcher {
           const full = path.join(source.dir, entry.name);
           try {
             const stat = fs.statSync(full);
-            if (!best || stat.mtimeMs > best.mtime) best = { file: full, mtime: stat.mtimeMs };
+            if (!best || stat.mtimeMs > best.mtime) best = { file: full, layout: 'flat', mtime: stat.mtimeMs };
           } catch {
             /* 文件可能刚被替换 */
           }
@@ -245,13 +252,13 @@ export class TranscriptWatcher {
         }
         try {
           const stat = fs.statSync(events);
-          if (!best || stat.mtimeMs > best.mtime) best = { file: events, mtime: stat.mtimeMs };
+          if (!best || stat.mtimeMs > best.mtime) best = { file: events, layout: 'session-state', mtime: stat.mtimeMs };
         } catch {
           /* 忽略 */
         }
       }
     }
-    return best?.file;
+    return best ? { file: best.file, layout: best.layout } : undefined;
   }
 
   /** 用 workspace.yaml 的 cwd / git_root 判断该 agent 会话是否属于当前项目 */
@@ -272,9 +279,12 @@ export class TranscriptWatcher {
     }
   }
 
-  private attach(file: string): void {
+  private attach(file: string, layout: TranscriptSource['layout']): void {
     this.file = file;
-    this.sessionId = path.basename(file, '.jsonl');
+    this.layout = layout;
+    // session-state 的事件文件统一叫 events.jsonl，会话 id 在父目录；取文件名会得到无意义的 "events"
+    this.sessionId =
+      layout === 'session-state' ? path.basename(path.dirname(file)) : path.basename(file, '.jsonl');
     this.leftover = '';
     this.reset();
     let size = 0;
@@ -419,12 +429,19 @@ export class TranscriptWatcher {
       this.turnStartedAt = Date.now();
       this.lastElapsedMs = 0;
       this.lastEventAt = Date.now();
+      this.abortReason = '';
       return;
     }
     if (type === 'assistant.turn_start') {
       this.active = true;
       this.turnOpen = true;
+      // 每一步模型消息都有自己的 turn_start：上一步的 turn_end 不能当成整轮结束，
+      // 否则两步之间的间隙会被软收尾成“已完成”，下一步又变回“进行中”（卡片状态反复）
+      this.turnEndedAt = 0;
+      this.softFinalSent = false;
       this.settledAt = 0;
+      this.lastEventAt = Date.now();
+      this.abortReason = '';
       return;
     }
     if (type === 'assistant.message') {
@@ -498,6 +515,16 @@ export class TranscriptWatcher {
       this.turnEndedAt = 0;
       this.softFinalSent = false;
       this.settledAt = 0;
+    } else if (type === 'abort') {
+      // 用户在 VS Code 侧停止：在途工具不会再回来，直接按整轮结束处理（可能一句话正文都没有）
+      this.abortReason = typeof data.reason === 'string' && data.reason ? data.reason : 'aborted';
+      this.toolStarts.clear();
+      this.toolInFlightCount = 0;
+      this.turnOpen = false;
+      this.turnEndedAt = Date.now();
+      this.softFinalSent = false;
+      this.settledAt = 0;
+      log(`transcript: 回合被用户停止（${this.abortReason}）`);
     } else if (type === 'assistant.turn_end') {
       // 每条模型消息结束都会触发；若后续没有工具/新消息，则视为回合结束
       this.turnEndedAt = Date.now();
@@ -518,6 +545,10 @@ export class TranscriptWatcher {
     }
     // 有 turn_end 时按 800ms 静默；没有 turn_end（VS Code 漏写）时用 5s 静默兜底
     if (this.turnEndedAt) {
+      // 上一步的 turn_end 之后又开了新的一步（turn_start）：整轮还没有结束
+      if (this.turnOpen) {
+        return;
+      }
       if (Date.now() - this.turnEndedAt < this.softFinalIdleMs) {
         return;
       }
@@ -528,19 +559,26 @@ export class TranscriptWatcher {
     if (!this.turnEndedAt && !this.text.trim()) {
       return;
     }
+    // 被用户停止时即使没有任何正文也必须收尾，否则卡片会永远停在“处理中”
+    const aborted = !!this.abortReason;
     this.settledAt = Date.now();
     this.softFinalSent = true;
     this.active = false;
     this.turnOpen = false;
-    if (this.silent || !this.thinking && !this.text && this.tools.length === 0) {
+    if (this.silent || (!aborted && !this.thinking && !this.text && this.tools.length === 0)) {
       return;
     }
-    this.onSoftFinal?.({
+    const event: StreamDelta = {
       sessionId: this.sessionId,
       thinking: this.thinking,
       text: this.text,
       tools: [...this.tools],
-    });
+    };
+    if (aborted) {
+      event.aborted = true;
+      this.abortReason = '';
+    }
+    this.onSoftFinal?.(event);
   }
 
   /** 工具 start 后没等到 complete（回合被取消/中断）会永久占住“在途”，超过 5 分钟就丢弃 */
@@ -610,6 +648,10 @@ export class TranscriptWatcher {
 
   private flush(): void {
     if (!this.dirty || (!this.thinking && !this.text && this.tools.length === 0)) {
+      return;
+    }
+    // 回合已被用户停止：不再推中间帧（否则会先画成“已完成”），交给 abort 的软收尾
+    if (this.abortReason) {
       return;
     }
     const now = Date.now();

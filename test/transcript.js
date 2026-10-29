@@ -174,6 +174,59 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
     throw new Error('静默且无在途工具时应判定可以收尾');
   }
 
+  // 7) 每一步模型消息都有自己的 turn_start/turn_end：下一步已经开始时不能软收尾，
+  //    否则卡片会在“处理中/已完成”之间反复（实测：步骤间隔常有 3s+）
+  watcher.stallIdleMs = 600000;
+  watcher.softFinalIdleMs = 120;
+  const beforeSoft = softFinals.length;
+  append({ type: 'user.message', data: { content: '多步提问' } });
+  append({ type: 'assistant.turn_start', data: {} });
+  append({ type: 'assistant.message', data: { content: '第一步正文' } });
+  await delay(60);
+  append({ type: 'assistant.turn_end', data: {} });
+  append({ type: 'assistant.turn_start', data: {} });
+  await delay(400);
+  if (softFinals.length !== beforeSoft) {
+    throw new Error('新的一步已经开始时不应软收尾（否则卡片会在处理中/已完成之间反复）');
+  }
+  if (!watcher.isTurnRunning()) {
+    throw new Error('两步之间必须仍然判定为回合运行中');
+  }
+  append({ type: 'assistant.message', data: { content: '第二步正文' } });
+  append({ type: 'assistant.turn_end', data: {} });
+  await delay(400);
+  if (softFinals.length !== beforeSoft + 1) {
+    throw new Error(`真正的回合结束必须软收尾，实际软收尾 ${softFinals.length - beforeSoft} 次`);
+  }
+  if (!softFinals[softFinals.length - 1].text.includes('第二步正文')) {
+    throw new Error('收尾未携带最后一步的正文');
+  }
+  if (watcher.isTurnRunning()) {
+    throw new Error('整轮结束后必须判定为不在运行');
+  }
+
+  // 8) 用户在 VS Code 侧发了消息马上停止：一句话正文都没有，也必须软收尾并标记 aborted，
+  //    否则飞书卡片会永远停在“处理中”（agent 会话的 abort 事件）
+  const beforeAbort = softFinals.length;
+  append({ type: 'user.message', data: { content: '发了马上停止' } });
+  append({ type: 'assistant.turn_start', data: {} });
+  append({ type: 'abort', data: { reason: 'user_initiated' } });
+  append({ type: 'assistant.turn_end', data: {} });
+  await delay(400);
+  if (softFinals.length !== beforeAbort + 1) {
+    throw new Error(`停止后必须软收尾（否则卡片永远停在处理中），实际 ${softFinals.length - beforeAbort} 次`);
+  }
+  const abortFinal = softFinals[softFinals.length - 1];
+  if (abortFinal.aborted !== true) {
+    throw new Error('停止产生的软收尾必须标记 aborted');
+  }
+  if (abortFinal.text.trim()) {
+    throw new Error(`停止的回合不应带正文: ${abortFinal.text}`);
+  }
+  if (watcher.isTurnRunning()) {
+    throw new Error('停止后必须判定为不在运行');
+  }
+
   watcher.stop();
   console.log(JSON.stringify({ deltas: deltas.length, sessions, softFinals: softFinals.length, prompts: prompts.length }, null, 2));
   console.log('PASS: transcript 增量提取符合预期');
