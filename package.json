@@ -2,7 +2,7 @@
   "name": "eww-bridge",
   "displayName": "EWW Bridge — Copilot Chat to Feishu / Lark",
   "description": "Stream your active VS Code Copilot Chat session to a Feishu/Lark card in real time, and send new tasks from Feishu back into the same chat session.",
-  "version": "1.0.27",
+  "version": "1.1.0",
   "publisher": "huangdan",
   "license": "MIT",
   "icon": "assets/icon.png",
@@ -79,11 +79,24 @@
       {
         "command": "ewwBridge.injectTest",
         "title": "EWW Bridge: 模拟飞书下发(注入当前会话)"
+      },
+      {
+        "command": "ewwBridge.patchCopilotFlush",
+        "title": "EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）"
+      },
+      {
+        "command": "ewwBridge.restoreCopilotFlush",
+        "title": "EWW Bridge: 还原内置 Copilot 落盘补丁"
       }
     ],
     "configuration": {
       "title": "EWW Bridge",
       "properties": {
+        "ewwBridge.copilotExtensionFile": {
+          "type": "string",
+          "default": "",
+          "description": "内置 Copilot 的 extension.js 路径（留空自动探测）。仅在自动探测失败或提示锚点不匹配时手动指定。"
+        },
         "ewwBridge.enabled": {
           "type": "boolean",
           "default": true,
@@ -173,7 +186,7 @@
   "scripts": {
     "compile": "tsc -p .",
     "watch": "tsc -w -p .",
-    "test": "node test/card.js && node test/parser.js && node test/transcript.js && node test/agent-task-complete.js && node test/smoke.js && node test/replay-floor.js && node test/partial.js && node test/instance.js && node test/activate.js",
+    "test": "node test/card.js && node test/parser.js && node test/transcript.js && node test/agent-task-complete.js && node test/copilot-patch.js && node test/smoke.js && node test/replay-floor.js && node test/partial.js && node test/instance.js && node test/activate.js",
     "package": "vsce package",
     "publish": "vsce publish"
   },

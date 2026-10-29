@@ -85,8 +85,37 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 | `EWW Bridge: 显示日志` | Open the output channel |
 | `EWW Bridge: 解析当前会话(调试)` | Dump the parsed session summary |
 | `EWW Bridge: 模拟飞书下发(注入当前会话)` | Test inbound injection |
+| `EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）` | Make Copilot flush its transcript immediately (see below) |
+| `EWW Bridge: 还原内置 Copilot 落盘补丁` | Restore the original Copilot bundle |
 
 The output channel also logs card updates with `(+XXms)` API round-trip timings.
+
+## Copilot flush patch (recommended)
+
+VS Code buffers Copilot's chat transcript in memory and only writes it out when the *next* event
+arrives, so during long background steps (e.g. a slow terminal command) the card can look frozen for
+tens of seconds. The patch wraps `SessionTranscript._bufferEntry` so every event is flushed right away.
+
+- Run `EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）` from the Command Palette, then reload the window.
+- First activation shows a one-time prompt if the patch is missing.
+- The patch backs up the bundle to `extension.js.eww-orig` and syntax-checks the result before writing;
+  `EWW Bridge: 还原内置 Copilot 落盘补丁` rolls back.
+- **VS Code updates overwrite the bundle** — the extension detects it and offers the patch again.
+- Needs write access to the VS Code install dir. If VS Code lives in `Program Files`, run VS Code as
+  administrator once, or run the bundled script from an elevated terminal:
+
+```bash
+node "<extension dir>/scripts/patch-copilot-flush.js"            # patch
+node "<extension dir>/scripts/patch-copilot-flush.js" --check    # status
+node "<extension dir>/scripts/patch-copilot-flush.js" --restore  # rollback
+node "<extension dir>/scripts/patch-copilot-flush.js" --path <extension.js>
+```
+
+The script lives at `<extension dir>/scripts/patch-copilot-flush.js` (shipped inside the VSIX) and
+auto-detects the newest VS Code install, including versioned layouts such as
+`…/Microsoft VS Code/<hash>/resources/app/extensions/copilot/dist/extension.js`.
+
+This is optional: without it EWW still works, cards just update less promptly during long tool steps.
 
 ## Chat commands (sent from Feishu)
 
@@ -104,6 +133,7 @@ The output channel also logs card updates with `(+XXms)` API round-trip timings.
 | Setting | Default | Description |
 |---|---|---|
 | `ewwBridge.enabled` | `true` | Enable the bridge |
+| `ewwBridge.copilotExtensionFile` | — | Manual path to Copilot's `extension.js` (only if auto-detect fails) |
 | `ewwBridge.feishu.appId` | — | Feishu app id (`cli_…`) |
 | `ewwBridge.feishu.defaultChatId` | — | Target chat id (`oc_…`) |
 | `ewwBridge.forward.userMessages` | `true` | Mirror prompts |
@@ -178,6 +208,18 @@ Update `publisher` in `package.json` to your own Marketplace publisher id before
 2. VS Code 执行 `EWW Bridge: 设置飞书应用凭据`（App ID/Secret），再执行 `EWW Bridge: 设置默认推送会话`
 3. 在飞书里直接发消息即可；`/status` `/stop` `/new` `/clear` 为内置指令
 4. 安全：务必配置 `ewwBridge.security.allowedOpenIds`，建议同时设置 `security.prefix`（如 `#ai`）
+5. **推荐**：执行 `EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）`，然后重载窗口（详见下节）
+
+**内置 Copilot 落盘补丁（可选，但强烈建议）**
+
+VS Code 把 Copilot 的会话记录缓存在内存里，要等下一条事件才写盘；后台长命令期间飞书卡片可能看起来“卡住”。补丁让每条事件立即落盘，卡片才能真流式。
+
+- 命令面板执行 `EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）` → 提示重载窗口
+- 没打过补丁时，插件首次激活会弹一次提示（每个 VS Code 版本最多一次）
+- 补丁自动备份为 `extension.js.eww-orig` 并做语法校验；`EWW Bridge: 还原内置 Copilot 落盘补丁` 可还原
+- **VS Code 升级会覆盖该文件**，插件会重新提示；也可手动跑随插件发布的脚本：
+  `node "<插件目录>/scripts/patch-copilot-flush.js"`（`--check` / `--restore` / `--path`）
+- VS Code 装在 `Program Files` 时需要管理员权限：用管理员身份启动一次 VS Code，或用管理员终端运行上面的脚本
 
 **行为说明**
 

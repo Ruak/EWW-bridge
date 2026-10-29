@@ -6,6 +6,7 @@ import {
   storeAppSecret,
   updateSetting,
 } from './config';
+import { applyCopilotPatch, copilotPatchStatus, patchScriptPath, restoreCopilotPatch } from './copilotPatch';
 import { FeishuAdapter, InboundMessage } from './feishu/adapter';
 import { buildStreamingCards, splitMarkdown } from './feishu/card';
 import type { CardPair } from './feishu/card';
@@ -1582,6 +1583,43 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         onDeliveryFailed: () => void vscode.window.showWarningMessage('投递失败：请确认聊天面板已打开。'),
       });
     }),
+    vscode.commands.registerCommand('ewwBridge.patchCopilotFlush', async () => {
+      const outcome = applyCopilotPatch();
+      log(`copilot patch: ${outcome.ok ? 'ok' : 'fail'} ${outcome.message}`);
+      if (!outcome.ok) {
+        const copy = '复制脚本命令';
+        const open = '查看安装路径';
+        const choice = await vscode.window.showErrorMessage(outcome.message, copy, open);
+        if (choice === copy) {
+          await vscode.env.clipboard.writeText(`node "${patchScriptPath()}" --path "${outcome.file || '<extension.js>'}"`);
+          await vscode.window.showInformationMessage('命令已复制到剪贴板。');
+        } else if (choice === open) {
+          initLog().show();
+        }
+        return;
+      }
+      if (outcome.alreadyPatched) {
+        await vscode.window.showInformationMessage(outcome.message);
+        return;
+      }
+      const reload = '立即重载窗口';
+      const choice = await vscode.window.showInformationMessage(outcome.message, reload);
+      if (choice === reload) {
+        await vscode.commands.executeCommand('workbench.action.reloadWindow');
+      }
+    }),
+    vscode.commands.registerCommand('ewwBridge.restoreCopilotFlush', async () => {
+      const outcome = restoreCopilotPatch();
+      log(`copilot patch: restore ${outcome.ok ? 'ok' : 'fail'} ${outcome.message}`);
+      if (outcome.ok) {
+        const reload = '立即重载窗口';
+        if ((await vscode.window.showInformationMessage(outcome.message, reload)) === reload) {
+          await vscode.commands.executeCommand('workbench.action.reloadWindow');
+        }
+      } else {
+        await vscode.window.showWarningMessage(outcome.message);
+      }
+    }),
   );
 
   context.subscriptions.push(
@@ -1606,6 +1644,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   updateStatus();
   const statusTimer = setInterval(updateStatus, 5000);
   context.subscriptions.push({ dispose: () => clearInterval(statusTimer) });
+
+  // 首次使用提醒：没打补丁时正文要等很久才同步（只提示一次/每个 VS Code 版本）
+  void (async () => {
+    try {
+      const patchState = copilotPatchStatus();
+      log(`copilot patch: ${patchState.state}${patchState.file ? ` (${patchState.file})` : ''}`);
+      if (patchState.state !== 'clean') {
+        return;
+      }
+      const hintKey = `copilotPatchHint:${vscode.version || 'unknown'}`;
+      if (context.globalState.get<boolean>(hintKey)) {
+        return;
+      }
+      const patch = '打补丁';
+      const later = '稍后';
+      const never = '本版本不再提示';
+      const choice = await vscode.window.showInformationMessage(
+        'EWW Bridge：VS Code 内置 Copilot 还没打“即时落盘”补丁，长任务时飞书卡片可能要等很久才更新。',
+        patch,
+        later,
+        never,
+      );
+      if (choice === patch) {
+        await vscode.commands.executeCommand('ewwBridge.patchCopilotFlush');
+      } else if (choice === never) {
+        await context.globalState.update(hintKey, true);
+      }
+    } catch (error) {
+      logError('copilot patch hint failed', error);
+    }
+  })();
 }
 
 export function deactivate(): void {

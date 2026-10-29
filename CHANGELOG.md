@@ -2,6 +2,29 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.1.0 — 内置 Copilot 落盘补丁随插件发布
+
+### 新增
+
+- 命令 `EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）`：一键把 `SessionTranscript._bufferEntry`
+  包一层，每条事件后立即 flush，transcript 近实时 → 飞书卡片才能真正流式（尤其在后台长命令等待期）。
+  - 自动定位内置 Copilot（支持 `…/Microsoft VS Code/<hash>/resources/app/extensions/copilot/dist/extension.js`
+    这类带版本子目录的布局，多版本共存时取最新的一个）；
+  - 写入前 `vm.Script` 语法校验，自动备份 `extension.js.eww-orig`；
+  - 写完直接提供「立即重载窗口」按钮。
+- 命令 `EWW Bridge: 还原内置 Copilot 落盘补丁`：从备份还原。
+- **随插件发布独立脚本** `scripts/patch-copilot-flush.js`（已包含在 VSIX 里）：
+  `node "<插件目录>/scripts/patch-copilot-flush.js" [--check|--restore|--path <extension.js>]`，
+  适合 VS Code 装在 `Program Files`（需管理员权限）或无法在扩展宿主里写文件的场景。
+- 新设置 `ewwBridge.copilotExtensionFile`：自动探测失败时手动指定 `extension.js`。
+- 未打补丁时，插件激活会弹一次提示（每个 VS Code 版本最多一次），可直接点「打补丁」。
+- 新增 `test/copilot-patch.js`（打补丁/幂等/还原/锚点不匹配/文件缺失）并接入 `npm test`。
+
+### 说明
+
+- 补丁是可选增强：不打补丁 EWW 照常工作，只是长工具步骤期间卡片更新会滞后。
+- VS Code 升级会覆盖 `extension.js`；插件会重新提示，也可重跑脚本。
+
 ## 1.0.27
 
 ### 卡片顺序与终稿外观
