@@ -2,6 +2,8 @@
  * 运行：node test/activate.js
  */
 process.env.EWW_NO_FILE_LOG = '1';
+const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const Module = require('module');
 
@@ -86,14 +88,38 @@ Module._load = function (request, parent, isMain) {
 
 const extension = require('../out/extension.js');
 
+// 自建临时工作区（不依赖本机 VS Code 的 workspaceStorage）：CI 在 Linux 上也能跑
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'eww-activate-'));
+const hashDir = path.join(tmpRoot, 'workspaceStorage', 'ci-workspace');
+const chatSessionsDir = path.join(hashDir, 'chatSessions');
+fs.mkdirSync(chatSessionsDir, { recursive: true });
+fs.writeFileSync(
+  path.join(chatSessionsDir, 'ci-session.jsonl'),
+  JSON.stringify({
+    kind: 0,
+    v: {
+      version: 3,
+      sessionId: 'ci-session',
+      requests: [
+        {
+          requestId: 'req-0',
+          timestamp: Date.now() - 60000,
+          message: { text: '历史问题' },
+          response: [{ value: '历史回答' }],
+          result: { timings: {} },
+        },
+      ],
+      pendingRequests: [],
+      inputState: { inputText: '' },
+    },
+  }) + '\n',
+);
+
 const context = {
   subscriptions: { push: (...items) => disposables.push(...items) },
-  storageUri: vscodeStub.Uri.file(
-    path.join(process.env.APPDATA, 'Code', 'User', 'workspaceStorage', '56cd9cc3297d26e12e6b21456fb3748c', 'eww-local.eww-bridge'),
-  ),
-  globalStorageUri: vscodeStub.Uri.file(path.join(process.env.APPDATA, 'Code', 'User', 'globalStorage', 'eww-local.eww-bridge')),
+  storageUri: vscodeStub.Uri.file(path.join(hashDir, 'eww-local.eww-bridge')),
+  globalStorageUri: vscodeStub.Uri.file(path.join(tmpRoot, 'globalStorage', 'eww-local.eww-bridge')),
   globalState: { get: (_key, fallback) => fallback, update: async () => {} },
-  workspaceState: { get: (_key, fallback) => fallback, update: async () => {} },
   workspaceState: { get: (_key, fallback) => fallback, update: async () => {} },
   secrets: { get: async () => undefined, store: async () => {} },
   extensionUri: vscodeStub.Uri.file(path.resolve(__dirname, '..')),
@@ -123,9 +149,11 @@ const context = {
   }
 
   extension.deactivate();
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
   console.log('\nPASS: activate 全链路正常（watcher 已附加，飞书缺省未连接）');
   process.exit(0);
 })().catch((error) => {
   console.error(error);
+  fs.rmSync(tmpRoot, { recursive: true, force: true });
   process.exit(1);
 });

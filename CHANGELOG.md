@@ -27,6 +27,11 @@ All notable changes to **EWW Bridge** are documented here.
 - 飞书卡片文案（`Copilot · 处理中…`、`已完成 · Ns`、`Copilot · 已停止` 等）保持中文，见 README「Card state」。
 - 运行时日志保持中文，与既有排障流程一致。
 
+### 测试 / CI
+
+- `test/activate.js` 改为自建临时工作区并写入一份会话快照，不再依赖本机
+  `%APPDATA%\Code\User\workspaceStorage`，`npm test` 在 Linux（GitHub Actions）上也能通过。
+
 ## 1.1.4 — 修复“发出后立刻停止，飞书卡片卡死”
 
 ### 修复
