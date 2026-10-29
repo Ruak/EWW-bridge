@@ -287,7 +287,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
   // 正文多源合并：只允许同一回合的 chatSessions 正文参与，避免新回合把上一轮的答复带出来
   const turnTailText = (sessionId?: string): string => {
-    if (!watcher?.partialState) {
+    if (!watcher?.partialState || !readConfig().patchStreamText) {
       return '';
     }
     const tail = watcher.tailText();
@@ -302,23 +302,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return tail.text;
   };
 
-  /** 两段正文是否属于同一个回答（前缀相同）：用于拒绝补丁流里旧回合的迟到正文 */
-  const sameStory = (current: string, candidate: string): boolean => {
-    const a = normalize(current);
+  /**
+   * 补丁流正文能否接在卡片现有正文后面：
+   * 卡片必须已经有 >=24 字（来自 transcript 的真实本轮内容），且候选正文以它开头。
+   * 只有这样才能保证不会把别的段落塞进当前卡片（实测事故：“新任务出现上一轮首位正文”）。
+   */
+  const tailCompatible = (base: string, candidate: string): boolean => {
+    const a = normalize(base);
     const b = normalize(candidate);
-    if (!a || !b) {
-      return true;
+    if (a.length < 24 || !b) {
+      return false;
     }
-    const probe = a.slice(0, 24);
-    return b.startsWith(probe) || a.startsWith(b.slice(0, 24));
+    return b.startsWith(a.slice(0, 24));
   };
 
   const mergedAnswer = (fallback: string, index?: number): string => {
     if (watcher?.partialState) {
-      // 残缺尾部下标不可信，改用补丁流实时正文（chatSessions 比 transcript 更早落盘）
-      const tail = turnTailText(watcher.getStatus().sessionId);
-      if (tail && sameStory(fallback || '', tail)) {
-        return pickLonger(fallback || '', tail);
+      const sessionId = watcher.getStatus().sessionId;
+      const state = activeStreams.get(sessionId);
+      const base = state?.lastAnswerText || fallback || '';
+      const tail = turnTailText(sessionId);
+      if (tail && tailCompatible(base, tail) && tail.length > base.length) {
+        return tail;
       }
       return fallback;
     }
@@ -840,6 +845,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (watcher) {
     // 补丁流拿到新正文：即使 transcript 还没落盘（后台等待期），也立刻推进卡片
     watcher.onTailText = (event) => {
+      if (!readConfig().patchStreamText) {
+        // 默认关闭：补丁流里的段落边界不可靠，容易把别的段落内容写进当前卡片
+        return;
+      }
       const state = activeStreams.get(event.sessionId);
       if (!state?.messageId || state.doneAt) {
         return;
@@ -849,8 +858,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return;
       }
       const answer = pickLonger(event.text, state.lastAnswerText ?? '');
-      if (!sameStory(state.lastAnswerText ?? '', answer)) {
-        log('outbound: 补丁流正文与当前卡片不同源，忽略（可能是旧回合迟到落盘）');
+      if (!tailCompatible(state.lastAnswerText ?? '', answer)) {
         return;
       }
       if (regressedAnswer(state, answer)) {
@@ -874,7 +882,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       log(`outbound: 补丁流正文 ${answer.length}ch（transcript 静默 ${Math.round((transcript?.quietMs ?? 0) / 1000)}s）`);
     };
 
-    // 补丁流里出现 result = 回合真正结束（chatSessions 常常比 transcript 先落盘）
+    // 补丁流里出现 result = 回合真正结束（只用来收尾，绝不引入补丁流正文，避免串段）
     watcher.onTailComplete = (event) => {
       const state = activeStreams.get(event.sessionId);
       if (!state?.messageId || state.doneAt) {
@@ -885,12 +893,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         log('outbound: 忽略旧回合的 result');
         return;
       }
-      const answer = pickLonger(event.text, state.lastAnswerText ?? '');
-      if (!answer.trim() || !sameStory(state.lastAnswerText ?? '', answer)) {
+      const answer = state.lastAnswerText ?? '';
+      if (!answer.trim()) {
         return;
       }
-      state.lastAnswerText = answer;
-      state.pendingTextLen = answer.length;
       log(`outbound: 补丁流收到 result #${event.index}，立即收尾（${answer.length}ch）`);
       void finalizeSettledCard(state);
     };

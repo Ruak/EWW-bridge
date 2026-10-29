@@ -2,7 +2,7 @@
   "name": "eww-bridge",
   "displayName": "EWW Bridge — Copilot Chat to Feishu / Lark",
   "description": "Stream your active VS Code Copilot Chat session to a Feishu/Lark card in real time, and send new tasks from Feishu back into the same chat session.",
-  "version": "1.0.20",
+  "version": "1.0.21",
   "publisher": "huangdan",
   "license": "MIT",
   "icon": "assets/icon.png",
@@ -129,6 +129,11 @@
           "type": "number",
           "default": 500,
           "description": "流式卡片的最小更新间隔（毫秒），越小越实时，过小可能触发飞书限频"
+        },
+        "ewwBridge.forward.patchStreamText": {
+          "type": "boolean",
+          "default": true,
+          "description": "从 chatSessions 补丁流提前叠加正文（仅在卡片已有正文且前缀一致时叠加，不会串段；可关闭）"
         },
         "ewwBridge.forward.idleMs": {
           "type": "number",

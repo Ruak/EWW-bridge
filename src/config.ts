@@ -10,6 +10,8 @@ export interface BridgeConfig {
   forwardProgress: boolean;
   forwardThinking: boolean;
   forwardStreaming: boolean;
+  /** 是否允许从 chatSessions 补丁流抽取正文（实验能力，默认关闭：可能串入别的段落） */
+  patchStreamText: boolean;
   streamingIntervalMs: number;
   idleMs: number;
   allowedOpenIds: string[];
@@ -33,6 +35,7 @@ export function readConfig(): BridgeConfig {
     forwardProgress: c.get<boolean>('forward.progress', true),
     forwardThinking: c.get<boolean>('forward.thinking', true),
     forwardStreaming: c.get<boolean>('forward.streaming', true),
+    patchStreamText: c.get<boolean>('forward.patchStreamText', true),
     streamingIntervalMs: Math.max(300, c.get<number>('forward.streamingIntervalMs', 500)),
     idleMs: Math.max(500, c.get<number>('forward.idleMs', 2500)),
     allowedOpenIds: (c.get<string[]>('security.allowedOpenIds', []) || []).map((s) => s.trim()).filter(Boolean),
