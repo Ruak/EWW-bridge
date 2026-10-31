@@ -75,6 +75,39 @@ if (fs.readFileSync(target, 'utf8') !== originalBundle) {
   fail('还原后内容与原始文件不一致');
 }
 
+// 回归：旧版补丁把定义改名了、包装方法插到了别的类（真实故障：Copilot 报
+// "this._bufferEntry is not a function"，对话请求全部失败）——应能就地补回来
+const halfPatchedBundle = [
+  'class ChatDebugFileLogger{constructor(){this._activeSessions=new Map()}',
+  'async flush(n){let r=this._activeSessions.get(n);return r&&r.length}}',
+  'class SessionTranscript{constructor(){this._activeSessions=new Map()}',
+  'logUserMessage(e,n){this._bufferEntry(e,{type:"user.message",data:{content:n}})}',
+  '_bufferEntryCore(e,n,r){let o=this._activeSessions.get(e);return o}',
+  'async flush(e){let n=this._activeSessions.get(e);return n&&n.length}}',
+  'module.exports={SessionTranscript};',
+].join('\n');
+fs.writeFileSync(target, halfPatchedBundle, 'utf8');
+fs.rmSync(`${target}.eww-orig`, { force: true });
+if (copilotPatchStatus().state === 'unsupported') {
+  fail('半成品补丁不应被判为 unsupported（应可修复）');
+}
+const healed = applyCopilotPatch();
+if (!healed.ok || healed.alreadyPatched) {
+  fail(`半成品补丁应能修复：${healed.message}`);
+}
+const healedCode = fs.readFileSync(target, 'utf8');
+const healedMod = { exports: {} };
+new Function('module', 'exports', healedCode)(healedMod, healedMod.exports);
+const transcript = new healedMod.exports.SessionTranscript();
+if (typeof transcript._bufferEntry !== 'function') {
+  fail('半成品补丁修复后目标类仍缺少 _bufferEntry');
+}
+transcript._activeSessions.set('s1', {});
+transcript.logUserMessage('s1', 'hi');
+if (copilotPatchStatus().state !== 'patched') {
+  fail('半成品补丁修复后状态应为 patched');
+}
+
 // 锚点不匹配：应该拒绝改动
 fs.writeFileSync(target, 'class X{other(){return 1}}', 'utf8');
 fs.rmSync(`${target}.eww-orig`, { force: true });

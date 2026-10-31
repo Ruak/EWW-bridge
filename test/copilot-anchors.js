@@ -60,10 +60,81 @@ for (const [label, firstParam, source] of variants) {
   }
 }
 
+// 回归：bundle 里别的类（如新版 ChatDebugFileLogger）也有同形态的 flush，且排在目标类之前。
+// 包装方法必须插回目标类，否则目标类丢了 _bufferEntry → Copilot 对话请求直接报
+// "this._bufferEntry is not a function"。
+const twoClassSource = [
+  'class Other{constructor(){this._activeSessions=new Map()}' +
+    '_bufferEntry(n,r){let o=this._activeSessions.get(n);return o}' +
+    'async flush(n){let r=this._activeSessions.get(n);return r.length}}',
+  'class S{constructor(){this._activeSessions=new Map()}' +
+    '_bufferEntry(e,n,r){let o=this._activeSessions.get(e);return o}' +
+    'async flush(e){let n=this._activeSessions.get(e);return n.length}}',
+  'module.exports={Other,S};',
+].join('');
+const built2 = buildPatchedCode(twoClassSource);
+if (!built2.ok) {
+  fail(`双类 bundle：应能打补丁，实际 ${built2.reason}`);
+}
+const code2 = built2.code;
+if (code2.indexOf('_bufferEntryCore(') < code2.indexOf('class S')) {
+  fail('双类 bundle：改名落到了别的类里');
+}
+if (!code2.includes('void this.flush(e).catch(()=>{})}_bufferEntryCore(e,n,r)')) {
+  fail('双类 bundle：包装方法没有紧贴目标类的 core 定义');
+}
+try {
+  new vm.Script(code2);
+} catch (error) {
+  fail(`双类 bundle：补丁后语法不合法：${error.message}`);
+}
+const mod = { exports: {} };
+new Function('module', 'exports', code2)(mod, mod.exports);
+const target = new mod.exports.S();
+const other = new mod.exports.Other();
+if (typeof target._bufferEntry !== 'function' || typeof target._bufferEntryCore !== 'function') {
+  fail('双类 bundle：目标类缺少 _bufferEntry/_bufferEntryCore');
+}
+if (typeof other._bufferEntry !== 'function' || typeof other._bufferEntryCore === 'function') {
+  fail('双类 bundle：另一个类被误改');
+}
+target._bufferEntry('s1', { type: 'x' }, undefined);
+
+// 半成品补丁（旧版把定义改名了、包装方法插到别的类）应能就地修好
+const halfPatched = twoClassSource
+  .replace('class S{constructor(){this._activeSessions=new Map()}_bufferEntry(e,n,r)', 'class S{constructor(){this._activeSessions=new Map()}_bufferEntryCore(e,n,r)')
+  .replace(
+    'async flush(n){let r=this._activeSessions.get(n);return r.length}}',
+    'async flush(n){let r=this._activeSessions.get(n);return r.length}_bufferEntry(n,r,x){this._bufferEntryCore(n,r,x)}}',
+  );
+const healed = buildPatchedCode(halfPatched);
+if (!healed.ok) {
+  fail(`半成品补丁：应能自愈，实际 ${healed.reason}`);
+}
+const code3 = healed.code;
+try {
+  new vm.Script(code3);
+} catch (error) {
+  fail(`半成品补丁：自愈后语法不合法：${error.message}`);
+}
+const mod3 = { exports: {} };
+new Function('module', 'exports', code3)(mod3, mod3.exports);
+const healedTarget = new mod3.exports.S();
+if (typeof healedTarget._bufferEntry !== 'function') {
+  fail('半成品补丁：自愈后目标类仍缺少 _bufferEntry');
+}
+healedTarget._bufferEntry('s1', { type: 'x' }, undefined);
+const again3 = buildPatchedCode(code3);
+if (again3.ok || again3.reason !== 'already') {
+  fail(`半成品补丁：自愈后重复打补丁应识别为 already，实际 ${again3.reason}`);
+}
+
 // 结构真的变了：必须拒绝，而不是瞎写
 const broken = buildPatchedCode('class S{_bufferEntry(e){return 1}}async flush(e){return 2}');
 if (broken.ok || broken.reason !== 'define-anchor') {
   fail(`结构不匹配时应返回 define-anchor，实际 ${broken.ok} ${broken.reason}`);
 }
 
-console.log(`PASS: 补丁锚点抗压缩变量改名（${variants.length} 种写法 + 拒绝不匹配结构）`);
+console.log(
+  `PASS: 补丁锚点抗压缩变量改名（${variants.length} 种写法 + 双类 bundle 插对位置 + 半成品自愈 + 拒绝不匹配结构）`,
+);

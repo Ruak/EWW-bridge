@@ -22,34 +22,50 @@ const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
-const MARK = '_bufferEntryCore';
 // 锚点用正则：VS Code 升级后压缩器变量名（e/n/r/o）可能变，但方法名与结构不变
 const DEFINE_RE =
   /_bufferEntry\(\s*([\w$]+)\s*,\s*([\w$]+)\s*,\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
-const FLUSH_RE = /async flush\(\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+const CORE_RE =
+  /_bufferEntryCore\(\s*([\w$]+)\s*,\s*([\w$]+)\s*,\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+// 已打补丁的标志：包装方法紧贴在 core 定义之前（同一类里），且参数名一致
+const PATCHED_RE = new RegExp(
+  '_bufferEntry\\(\\s*([\\w$]+)\\s*,\\s*([\\w$]+)\\s*,\\s*([\\w$]+)\\s*\\)\\s*\\{\\s*' +
+    'this\\._bufferEntryCore\\(\\s*\\1\\s*,\\s*\\2\\s*,\\s*\\3\\s*\\);\\s*' +
+    'void\\s+this\\.flush\\(\\s*\\1\\s*\\)\\.catch\\(\\(\\)=>\\{\\}\\)\\s*\\}' +
+    '_bufferEntryCore\\(',
+);
+
+const wrapperFor = (a, b, c) =>
+  `_bufferEntry(${a},${b},${c}){this._bufferEntryCore(${a},${b},${c});` + `void this.flush(${a}).catch(()=>{})}`;
+
+function isPatched(code) {
+  return PATCHED_RE.test(code);
+}
 
 /** 生成补丁源码；返回 { ok, code, reason } */
 function buildPatchedCode(code) {
-  if (code.includes(MARK)) {
+  if (isPatched(code)) {
     return { ok: false, reason: 'already' };
+  }
+  // 旧版补丁只改了名、包装方法插错到别的类：就地补一个，不用还原重来
+  const core = CORE_RE.exec(code);
+  if (core) {
+    const wrapper = wrapperFor(core[1], core[2], core[3]);
+    return { ok: true, code: code.slice(0, core.index) + wrapper + code.slice(core.index) };
   }
   const define = DEFINE_RE.exec(code);
   if (!define) {
     return { ok: false, reason: 'define-anchor' };
   }
+  // 包装方法必须紧贴改名后的定义插入：bundle 里别的类（新版 ChatDebugFileLogger）也有同形态的
+  // async flush，早先按 flush 定位会把包装插到那个类里，本类丢了 _bufferEntry →
+  // Copilot 每次发消息都报 "this._bufferEntry is not a function"，整个对话请求失败。
   const [, a, b, c] = define;
-  const defineText = define[0];
-  const coreText = defineText.replace('_bufferEntry(', '_bufferEntryCore(');
-  let next = code.slice(0, define.index) + coreText + code.slice(define.index + defineText.length);
-  const flush = FLUSH_RE.exec(next);
-  if (!flush) {
-    return { ok: false, reason: 'flush-anchor' };
-  }
-  const wrapper =
-    `_bufferEntry(${a},${b},${c}){this._bufferEntryCore(${a},${b},${c});` +
-    `void this.flush(${a}).catch(()=>{})}`;
-  next = next.slice(0, flush.index) + wrapper + next.slice(flush.index);
-  return { ok: true, code: next };
+  const coreText = define[0].replace('_bufferEntry(', '_bufferEntryCore(');
+  return {
+    ok: true,
+    code: code.slice(0, define.index) + wrapperFor(a, b, c) + coreText + code.slice(define.index + define[0].length),
+  };
 }
 
 function walkForBundle(root, depth, found) {
@@ -124,8 +140,8 @@ if (!target || !fs.existsSync(target)) {
 }
 
 const backup = `${target}.eww-orig`;
-const code = fs.readFileSync(target, 'utf8');
-const patched = code.includes(MARK);
+let code = fs.readFileSync(target, 'utf8');
+const patched = isPatched(code);
 
 if (mode === 'check') {
   console.log(`file: ${target}`);
@@ -149,15 +165,13 @@ if (patched) {
   process.exit(0);
 }
 
-if (!code.includes(MARK)) {
-  const built = buildPatchedCode(code);
-  if (!built.ok) {
-    console.error(`锚点不匹配（${built.reason}）：当前 VS Code / Copilot 的打包结构可能已变化，未做修改。`);
-    console.error('请到插件仓库反馈，或等待插件更新；期间功能照常。');
-    process.exit(1);
-  }
-  code = built.code;
+const built = buildPatchedCode(code);
+if (!built.ok) {
+  console.error(`锚点不匹配（${built.reason}）：当前 VS Code / Copilot 的打包结构可能已变化，未做修改。`);
+  console.error('请到插件仓库反馈，或等待插件更新；期间功能照常。');
+  process.exit(1);
 }
+code = built.code;
 
 const next = code;
 
