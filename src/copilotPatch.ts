@@ -14,38 +14,58 @@ import { log } from './log';
  * 说明：VS Code 升级会覆盖 extension.js，需要重打；本模块与随插件发布的
  * `scripts/patch-copilot-flush.js` 使用同一套锚点。
  */
-const MARK = '_bufferEntryCore';
 // 锚点用正则而不是固定字符串：VS Code 升级后压缩器的变量名（e/n/r/o）可能变，但方法名与结构不变
 const DEFINE_RE =
   /_bufferEntry\(\s*([\w$]+)\s*,\s*([\w$]+)\s*,\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
-const FLUSH_RE = /async flush\(\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+const CORE_RE =
+  /_bufferEntryCore\(\s*([\w$]+)\s*,\s*([\w$]+)\s*,\s*([\w$]+)\s*\)\s*\{let\s+([\w$]+)\s*=\s*this\._activeSessions\.get\(\s*\1\s*\)/;
+// 已打补丁的标志：包装方法紧贴在 core 定义之前（同一类里），且参数名一致
+const PATCHED_RE = new RegExp(
+  '_bufferEntry\\(\\s*([\\w$]+)\\s*,\\s*([\\w$]+)\\s*,\\s*([\\w$]+)\\s*\\)\\s*\\{\\s*' +
+    'this\\._bufferEntryCore\\(\\s*\\1\\s*,\\s*\\2\\s*,\\s*\\3\\s*\\);\\s*' +
+    'void\\s+this\\.flush\\(\\s*\\1\\s*\\)\\.catch\\(\\(\\)=>\\{\\}\\)\\s*\\}' +
+    '_bufferEntryCore\\(',
+);
+
+const wrapperFor = (a: string, b: string, c: string): string =>
+  `_bufferEntry(${a},${b},${c}){this._bufferEntryCore(${a},${b},${c});` + `void this.flush(${a}).catch(()=>{})}`;
+
+export function isCopilotPatched(code: string): boolean {
+  return PATCHED_RE.test(code);
+}
 
 /**
  * 生成打过补丁的 bundle 源码（纯函数，便于单测）。
  * 做两件事：`_bufferEntry` 改名 `_bufferEntryCore`，再插入一个同名包装方法，每条事件后立即 flush。
+ *
+ * 包装方法必须紧贴改名后的定义插入：bundle 里还有别的类（新版 ChatDebugFileLogger）也定义了同形态的
+ * `async flush`，早先按 flush 定位会把包装插到那个类里，本类的 `_bufferEntry` 就此消失，
+ * Copilot 每次发消息都报 "this._bufferEntry is not a function"，整个对话请求失败。
  */
 export function buildPatchedCode(code: string): { ok: boolean; code?: string; reason?: string } {
-  if (code.includes(MARK)) {
+  if (isCopilotPatched(code)) {
     return { ok: false, reason: 'already' };
+  }
+  // 旧版补丁只改了名、包装方法插错到别的类：就地补一个，不用还原重来
+  const core = CORE_RE.exec(code);
+  if (core && core.index !== undefined) {
+    const wrapper = wrapperFor(core[1], core[2], core[3]);
+    return { ok: true, code: code.slice(0, core.index) + wrapper + code.slice(core.index) };
   }
   const define = DEFINE_RE.exec(code);
   if (!define || define.index === undefined) {
     return { ok: false, reason: 'define-anchor' };
   }
   const [, a, b, c] = define;
-  const defineText = define[0];
-  const coreText = defineText.replace('_bufferEntry(', '_bufferEntryCore(');
-  let next = code.slice(0, define.index) + coreText + code.slice(define.index + defineText.length);
-  const flush = FLUSH_RE.exec(next);
-  if (!flush || flush.index === undefined) {
-    return { ok: false, reason: 'flush-anchor' };
-  }
-  const wrapper =
-    `_bufferEntry(${a},${b},${c}){this._bufferEntryCore(${a},${b},${c});` +
-    `void this.flush(${a}).catch(()=>{})}`;
-  next = next.slice(0, flush.index) + wrapper + next.slice(flush.index);
+  const coreText = define[0].replace('_bufferEntry(', '_bufferEntryCore(');
+  const next =
+    code.slice(0, define.index) +
+    wrapperFor(a, b, c) +
+    coreText +
+    code.slice(define.index + define[0].length);
   return { ok: true, code: next };
 }
+
 
 export type CopilotPatchState = 'patched' | 'clean' | 'unsupported' | 'missing';
 
@@ -158,9 +178,9 @@ export function copilotPatchStatus(): CopilotPatchStatus {
   }
   try {
     const code = fs.readFileSync(file, 'utf8');
-    const state: CopilotPatchState = code.includes(MARK)
+    const state: CopilotPatchState = isCopilotPatched(code)
       ? 'patched'
-      : DEFINE_RE.test(code) && FLUSH_RE.test(code)
+      : DEFINE_RE.test(code) || CORE_RE.test(code)
         ? 'clean'
         : 'unsupported';
     return { state, file, backup: fs.existsSync(`${file}.eww-orig`) };
@@ -185,7 +205,7 @@ export function applyCopilotPatch(): CopilotPatchOutcome {
   } catch (error) {
     return { ok: false, file, message: `读取失败：${errText(error)}` };
   }
-  if (code.includes(MARK)) {
+  if (isCopilotPatched(code)) {
     return { ok: true, alreadyPatched: true, file, message: '已经打过补丁，无需重复。' };
   }
   const built = buildPatchedCode(code);
