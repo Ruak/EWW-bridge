@@ -75,6 +75,16 @@
 				"E:\\repo\\EWW\\.fix.cmd"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "final commit",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.c3.cmd"
+			],
+			"isBackground": false
 		}
 	]
 }
