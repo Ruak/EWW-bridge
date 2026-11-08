@@ -2,16 +2,36 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
-> **English summary (1.1.2 – 1.1.5)** — card lifecycle + English UI:
-> ① **one question = one card**: agent sessions used to derive the session id from `events.jsonl`,
-> creating a second card keyed `events` that never received content and stayed at `进行中`;
-> ② **deterministic card state**: the title/footer follow the whole turn (`处理中…` while running,
-> `已完成 · Ns` only at the end) instead of flipping on every model step;
-> ③ **stop-aware**: cancelling a turn in VS Code right after sending now finalizes the card as
-> `Copilot · 已停止` instead of leaving it stuck;
-> ④ **localized UI**: command titles and setting descriptions follow VS Code's display language
-> (English default, Simplified Chinese via `package.nls.zh-cn.json`). Card labels stay Chinese — see
-> README → “Card state”.
+## 1.1.7 — 偶发“进行中”多余卡片 + 一键切换工作区/对话
+
+> **English summary** — ① **stray “进行中” card**: a placeholder bound to an old session key could
+> keep heartbeating forever while the real answer landed on a second card. Orphans are now retired
+> deterministically (15 s key-switch confirmation, 240 s no-text timeout, and cards still being
+> created are waited for before finalizing). ② **switch faster**: `Pick the Conversation to Mirror`
+> pins a chat (agent sessions listed with their titles) and `Pick Push Target Chat` remembers the
+> target **per workspace**, so switching projects automatically switches the push target.
+
+### 修复：偶发多出一张“进行中”卡片
+
+- **根因**：占位卡的会话键（transcript 会话 id）与最终收到正文的键不一致时，旧键的卡片再也收不到
+  事件，但心跳仍在跑 → 一直显示 `进行中…（已等待 Ns）`；旧逻辑只回收“完全没有正文、且已经拿到
+  messageId、且新键正在活跃写入（30s 内）”的占位卡，三种边界都会漏。
+- 现在统一走 `retireStreamCard()`：
+  - 会话键切换后**确认 15s** 仍在别处 → 收尾（有正文按正文定稿，没正文写说明），不再依赖新键是否活跃；
+  - 建卡还在途中的（`creating` 未完成）**等拿到 messageId 再收尾**，避免留下永远“进行中”的卡；
+  - 有正文的孤儿也会定稿，而不是被跳过；
+  - 新增 240s 兜底：一直没有任何正文、也没有在途工具/后台命令的占位卡直接收尾。
+- 新增 `lastEventAt`（只在真正收到本会话事件时更新），把“心跳自身刷新”和“有内容进展”区分开。
+
+### 新增：切换工作区 / 切换对话更简单
+
+- 命令 **`EWW Bridge: 选择推送会话（按工作区记忆）`**：从最近用过的会话里选一个，**记到当前工作区**；
+  切换工作区时自动回落到该工作区上次用的会话（顺序：工作区绑定 → 全局默认 → 最近一次）。
+  支持“解除本工作区绑定”和“手动输入 chat_id”。
+- 命令 **`EWW Bridge: 选择要镜像的对话（切换同步对象）`**：列出最近的对话（agent 会话带标题与
+  所属项目，经典会话按时间），选中即**固定跟随**该对话；选“自动跟随最新对话”即可恢复默认行为。
+  固定的文件被删除时会自动恢复跟随。
+- 状态栏 tooltip 与 `/status` 增加「镜像对话：已固定 … / 自动跟随最新」和「推送目标（本工作区已绑定）」。
 
 ## 1.1.6 — ?? Copilot ???????????????
 

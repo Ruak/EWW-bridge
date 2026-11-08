@@ -8,6 +8,8 @@
   "command.showLogs": "EWW Bridge: 显示日志",
   "command.dumpCurrentSession": "EWW Bridge: 解析当前会话(调试)",
   "command.followLatestSession": "EWW Bridge: 跟随最新会话（新开对话后不同步时用）",
+  "command.pickSession": "EWW Bridge: 选择要镜像的对话（切换同步对象）",
+  "command.pickChat": "EWW Bridge: 选择推送会话（按工作区记忆）",
   "command.injectTest": "EWW Bridge: 模拟飞书下发(注入当前会话)",
   "command.patchCopilotFlush": "EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）",
   "command.restoreCopilotFlush": "EWW Bridge: 还原内置 Copilot 落盘补丁",

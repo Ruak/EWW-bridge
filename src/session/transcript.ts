@@ -26,6 +26,18 @@ export interface TranscriptSource {
   workspaceFolder?: string;
 }
 
+/** 供“选择要镜像的对话”使用的最小会话信息 */
+export interface SessionListItem {
+  file: string;
+  layout: TranscriptSource['layout'];
+  id: string;
+  /** agent 会话的标题（workspace.yaml 的 name），经典会话为空 */
+  title: string;
+  /** agent 会话所属项目目录 */
+  workspace: string;
+  mtime: number;
+}
+
 /**
  * 实时源：GitHub.copilot-chat/transcripts/<session>.jsonl
  *
@@ -220,6 +232,18 @@ export class TranscriptWatcher {
   }
 
   private findNewest(): { file: string; layout: TranscriptSource['layout'] } | undefined {
+    // 用户手动固定了某个对话：只要文件还在就只跟它，不再被“最新写入”抢走
+    if (this.pinned) {
+      try {
+        if (fs.existsSync(this.pinned.file)) {
+          return this.pinned;
+        }
+      } catch {
+        /* 忽略 */
+      }
+      log(`transcript: 固定的会话文件已不存在，恢复自动跟随（${this.pinned.file}）`);
+      this.pinned = undefined;
+    }
     let best: { file: string; layout: TranscriptSource['layout']; mtime: number } | undefined;
     for (const source of this.sources) {
       let entries: fs.Dirent[];
@@ -276,6 +300,104 @@ export class TranscriptWatcher {
       return false;
     } catch {
       return false;
+    }
+  }
+
+  /** 用户手动固定的会话文件（选择“要镜像的对话”后不再自动跟随最新） */
+  private pinned?: { file: string; layout: TranscriptSource['layout'] };
+
+  /** 固定镜像某个对话；next poll 立即切过去 */
+  pinSession(file: string, layout: TranscriptSource['layout']): void {
+    this.pinned = { file, layout };
+    if (this.file !== file) {
+      this.attach(file, layout);
+    } else {
+      this.layout = layout;
+    }
+    log(`transcript: 固定跟随 ${file}`);
+  }
+
+  /** 取消固定，恢复“跟随最新写入” */
+  unpinSession(): void {
+    if (this.pinned) {
+      log(`transcript: 取消固定 ${this.pinned.file}`);
+    }
+    this.pinned = undefined;
+  }
+
+  get pinnedFile(): string | undefined {
+    return this.pinned?.file;
+  }
+
+  /** 列出可选的对话（agent 会话带标题，经典会话按时间倒序） */
+  listSessions(limit = 15): SessionListItem[] {
+    const items: SessionListItem[] = [];
+    for (const source of this.sources) {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(source.dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      if (source.layout === 'flat') {
+        for (const entry of entries) {
+          if (!entry.isFile() || !entry.name.endsWith('.jsonl')) continue;
+          const full = path.join(source.dir, entry.name);
+          try {
+            const stat = fs.statSync(full);
+            items.push({
+              file: full,
+              layout: 'flat',
+              id: path.basename(entry.name, '.jsonl'),
+              title: '',
+              workspace: '',
+              mtime: stat.mtimeMs,
+            });
+          } catch {
+            /* 忽略 */
+          }
+        }
+        continue;
+      }
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const sessionDir = path.join(source.dir, entry.name);
+        const events = path.join(sessionDir, 'events.jsonl');
+        try {
+          const stat = fs.statSync(events);
+          const meta = this.readAgentMeta(sessionDir);
+          items.push({
+            file: events,
+            layout: 'session-state',
+            id: entry.name,
+            title: meta.name,
+            workspace: meta.cwd,
+            mtime: stat.mtimeMs,
+          });
+        } catch {
+          /* 忽略 */
+        }
+      }
+    }
+    return items.sort((a, b) => b.mtime - a.mtime).slice(0, limit);
+  }
+
+  /** 读取 agent 会话目录的 workspace.yaml（标题与所属项目） */
+  private readAgentMeta(sessionDir: string): { name: string; cwd: string } {
+    try {
+      const yaml = fs.readFileSync(path.join(sessionDir, 'workspace.yaml'), 'utf8');
+      const pick = (key: string): string => {
+        const line = yaml.split('\n').find((item) => new RegExp(`^\\s*${key}:`).test(item));
+        return line
+          ? line
+              .replace(new RegExp(`^\\s*${key}:\\s*`), '')
+              .trim()
+              .replace(/^["']|["']$/g, '')
+          : '';
+      };
+      return { name: pick('name'), cwd: pick('cwd') };
+    } catch {
+      return { name: '', cwd: '' };
     }
   }
 

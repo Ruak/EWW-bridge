@@ -104,6 +104,53 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const injector = new Injector(watcher, transcript, () => lastContentActivityAt, terminalWatch);
   let lastChatId: string = context.globalState.get<string>(STATE_LAST_CHAT_ID, '') || '';
 
+  // ---- 推送目标：按工作区记忆，切换工程自动回落到该工程上次用的会话 ----
+  const WORKSPACE_CHAT_KEY = 'ewwBridge.chatByWorkspace';
+  const RECENT_CHATS_KEY = 'ewwBridge.recentChats';
+  interface RecentChat {
+    id: string;
+    at: number;
+    workspace?: string;
+  }
+  const workspaceKey = (): string => vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
+  const chatBindings = (): Record<string, string> => {
+    const stored = context.globalState.get<Record<string, string>>(WORKSPACE_CHAT_KEY);
+    return stored && typeof stored === 'object' ? stored : {};
+  };
+  const boundChatId = (): string => chatBindings()[workspaceKey()] || '';
+  const recentChats = (): RecentChat[] => {
+    const stored = context.globalState.get<RecentChat[]>(RECENT_CHATS_KEY);
+    return Array.isArray(stored) ? stored : [];
+  };
+  const rememberChat = (chatId: string): void => {
+    if (!chatId) {
+      return;
+    }
+    lastChatId = chatId;
+    void context.globalState.update(STATE_LAST_CHAT_ID, chatId);
+    const next = [
+      { id: chatId, at: Date.now(), workspace: workspaceKey() },
+      ...recentChats().filter((item) => item.id !== chatId),
+    ];
+    void context.globalState.update(RECENT_CHATS_KEY, next.slice(0, 10));
+  };
+  const bindChatToWorkspace = (chatId: string): void => {
+    const key = workspaceKey();
+    if (!key) {
+      void vscode.window.showWarningMessage('当前窗口没有打开文件夹，无法按工作区绑定。');
+      return;
+    }
+    const next = { ...chatBindings() };
+    if (chatId) {
+      next[key] = chatId;
+    } else {
+      delete next[key];
+    }
+    void context.globalState.update(WORKSPACE_CHAT_KEY, next);
+    rememberChat(chatId);
+    updateStatus();
+  };
+
   const echoQueue: { text: string; at: number }[] = [];
   const rate = new Map<string, number[]>();
   /** transcript 已即时镜像过的提问，避免 chatSessions 迟到后再发一次 */
@@ -114,7 +161,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   status.show();
   context.subscriptions.push(status);
 
-  const targetChatId = () => readConfig().defaultChatId || lastChatId;
+  const targetChatId = () => boundChatId() || readConfig().defaultChatId || lastChatId;
 
   const statusText = (): string => {
     const snapshot = watcher?.getStatus();
@@ -122,10 +169,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return [
       `连接: ${STATE_LABEL[state] ?? state}`,
       `会话: ${snapshot?.sessionId || '-'}`,
+      `镜像对话: ${transcript?.pinnedFile ? `已固定 ${transcript.currentSessionId.slice(0, 8)}` : '自动跟随最新'}`,
       `请求数: ${snapshot?.requests ?? 0}`,
       `忙碌: ${snapshot?.busy ? '是' : '否'}`,
       `注入队列: ${injector.pending}`,
-      `推送目标: ${targetChatId() || '未设置'}`,
+      `推送目标: ${targetChatId() || '未设置'}${boundChatId() ? '（本工作区已绑定）' : ''}`,
       `注入方式: ${readConfig().newChat ? '每次新会话' : '追加当前会话'}`,
       lastStartError ? `最近错误: ${lastStartError}` : '',
     ]
@@ -188,6 +236,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     /** 最近一次收到的正文/工具，供心跳卡片复用，避免长回合无内容可推 */
     lastAnswerText?: string;
     lastTools?: string[];
+    /** 最近一次真正收到本会话事件的时间（心跳/建卡区间不算），用于判定陈旧状态 */
+    lastEventAt?: number;
     /** 诊断：待发送正文长度 / 已发送正文长度 */
     pendingTextLen?: number;
     lastSentTextLen?: number;
@@ -408,34 +458,61 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   /**
-   * 同一聊天里为不同会话键留下的空占位卡：另一个键再也收不到正文，
-   * 不处理就会一直显示“进行中”。建新卡或心跳发现键已切换时，把它收成终态。
+   * 同一聊天里为不同会话键留下的占位卡：那个键再也收不到正文，不处理就会一直显示“进行中”。
+   * 建新卡或心跳发现键已切换时，把它收成终态。
    */
-  const retireOrphanPlaceholders = (chatId: string, keepSessionId: string): void => {
-    for (const [key, other] of activeStreams) {
-      if (key === keepSessionId || other.chatId !== chatId || other.doneAt || !other.messageId) {
-        continue;
-      }
-      if ((other.lastAnswerText ?? '').trim() || other.softFinalText) {
-        continue;
-      }
-      stopHeartbeat(key);
+  const orphanSince = new Map<string, number>();
+
+  /**
+   * 把一个再无后续的会话键收成终态：有正文就定稿，没正文就把占位卡改成说明文案。
+   * 建卡还在途中的也要等拿到 messageId 再收，否则会留一张永远“进行中”的卡。
+   */
+  const retireStreamCard = (key: string, state: TurnStream, note: string): void => {
+    stopHeartbeat(key);
+    orphanSince.delete(key);
+    if (activeStreams.get(key) === state) {
       activeStreams.delete(key);
-      log(
-        `outbound: 回收空占位卡 #${other.messageId.slice(-8)}（会话键 ${key.slice(0, 8)} 已被 ${keepSessionId.slice(0, 8)} 取代）`,
-      );
+    }
+    const answer = pickLonger(state.lastAnswerText ?? '', state.softFinalText ?? '');
+    const finish = (id: string): void => {
       void feishu
         ?.patchCardPair(
-          other.messageId,
+          id,
           buildStreamingCards({
             title: 'Copilot',
-            answer: '本轮的输出已转到新的卡片继续（会话标识变化）。',
+            answer: answer || note,
             expanded: false,
             showThinking: false,
+            answerLimit: 12000,
             footer: doneFooter(),
           }),
         )
-        .catch((error) => logError('outbound retire placeholder failed', error));
+        .catch((error) => logError('outbound retire card failed', error));
+      log(
+        `outbound: 收尾孤儿卡片 #${id.slice(-8)}（会话 ${key.slice(0, 8)}，${answer ? `${answer.length}ch` : note}）`,
+      );
+    };
+    if (state.messageId) {
+      finish(state.messageId);
+      return;
+    }
+    if (state.creating) {
+      void state.creating
+        .then((id) => {
+          if (id) {
+            finish(id);
+          }
+        })
+        .catch(() => undefined);
+    }
+  };
+
+  const retireOrphanPlaceholders = (chatId: string, keepSessionId: string): void => {
+    for (const [key, other] of activeStreams) {
+      if (key === keepSessionId || other.chatId !== chatId || other.doneAt) {
+        continue;
+      }
+      retireStreamCard(key, other, '本轮的输出已转到新的卡片继续（会话标识变化）。');
     }
   };
 
@@ -456,6 +533,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         patches: 0,
         lastRendered: '',
         lastPatchAt: Date.now(),
+        lastEventAt: Date.now(),
         turnStartedAt: 0,
       };
       activeStreams.set(sessionId, state);
@@ -577,23 +655,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         stopHeartbeat(sessionId);
         return;
       }
-      // 会话键已经切到别处（agent 会话/换会话）：这张卡再也收不到正文，收成终态别一直“进行中”。
-      // 只在新的键确实有事件在写时才动手，避免两个源 mtime 抖动造成的误收尾。
+      // 会话键已经切到别处（agent 会话/换会话/新开对话）：这张卡再也收不到正文，
+      // 不处理就会一直显示“进行中…（已等待 Ns）”。确认 15s 仍在别处再收尾，
+      // 避免两个数据源 mtime 抖动造成的误判。
       const currentKey = outboundSessionId();
-      const keySwitched =
-        !!currentKey && currentKey !== sessionId && Date.now() - (transcript?.lastActivity ?? 0) < 30000;
-      if (keySwitched) {
-        if (state.softFinalText || (state.lastAnswerText ?? '').trim()) {
-          void finalizeSettledCard(state);
+      if (currentKey && currentKey !== sessionId) {
+        const since0 = orphanSince.get(sessionId) ?? Date.now();
+        orphanSince.set(sessionId, since0);
+        if (Date.now() - since0 >= 15000) {
+          log(`outbound: 会话键已切到 ${currentKey.slice(0, 8)}，收尾旧卡片（${sessionId.slice(0, 8)}）`);
+          retireStreamCard(sessionId, state, '会话已切换，本卡片不再更新。');
           return;
         }
-        retireOrphanPlaceholders(state.chatId, currentKey);
-        if (!activeStreams.has(sessionId)) {
-          return;
-        }
+      } else {
+        orphanSince.delete(sessionId);
       }
       const running = transcript?.activeTools() ?? [];
       const top = running[running.length - 1];
+      // 一直没有任何正文、也没有在途工具与后台命令：占位卡不该无限“进行中”
+      const stateIdleMs = Date.now() - (state.lastEventAt ?? state.turnStartedAt ?? state.lastPatchAt);
+      const quietTooLong = (transcript?.quietMs ?? 0) > 240000;
+      if (!top && !terminalWatch.hasRecent() && quietTooLong && stateIdleMs > 240000 && !(state.lastAnswerText ?? '').trim()) {
+        retireStreamCard(sessionId, state, '本轮没有产出文字输出。');
+        return;
+      }
       // 已软结束且没有在执行的工具：保持终稿外观，不再刷心跳
       if (!top && state.softFinalText) {
         stopHeartbeat(sessionId);
@@ -947,6 +1032,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             existing.lastAnswerText = answer;
             existing.lastTools = event.tools;
             existing.pendingTextLen = answer.length;
+            existing.lastEventAt = Date.now();
           }
           if (existing?.messageId) {
             await queueStreamCard(existing, cards);
@@ -970,6 +1056,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!state?.messageId || state.doneAt) {
         return;
       }
+      state.lastEventAt = Date.now();
       const toolAnswer = state.lastAnswerText ?? '';
       if (regressedAnswer(state, toolAnswer)) {
         // 已渲染的正文比当前快照长：不回退，只保留心跳
@@ -1198,6 +1285,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           state.lastAnswerText = answer;
           state.lastTools = event.tools;
           state.pendingTextLen = answer.length;
+          state.lastEventAt = Date.now();
           await queueStreamCard(state, cards);
         } catch (error) {
           logError('outbound partial failed', error);
@@ -1299,6 +1387,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (state) {
         state.lastAnswerText = event.text;
         state.lastTools = event.tools;
+        state.lastEventAt = Date.now();
       }
       // 防止软结束（transcript 完整）被更短的最终文本覆盖导致“截断”
       if (state?.softFinalText && !aborted && !waitingMore) {
@@ -1408,9 +1497,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // ---------------- 入站：飞书 -> 当前会话 ----------------
   const handleInbound = async (message: InboundMessage): Promise<void> => {
     const reply = (text: string) => feishu?.sendText(message.chatId, text);
-    if (!readConfig().defaultChatId && message.chatId) {
-      lastChatId = message.chatId;
-      await context.globalState.update(STATE_LAST_CHAT_ID, message.chatId);
+    if (message.chatId) {
+      rememberChat(message.chatId);
       updateStatus();
     }
 
@@ -1671,6 +1759,139 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         updateStatus();
       } else {
         await vscode.window.showInformationMessage(`当前会话就是最新的（${(after || '-').slice(0, 8)}）。`);
+      }
+    }),
+    vscode.commands.registerCommand('ewwBridge.pickSession', async () => {
+      if (!transcript) {
+        await vscode.window.showWarningMessage('未找到可跟随的对话目录。');
+        return;
+      }
+      const agoText = (at: number): string => {
+        const sec = Math.max(0, Math.round((Date.now() - at) / 1000));
+        if (sec < 90) return `${sec}s 前`;
+        if (sec < 5400) return `${Math.round(sec / 60)} 分钟前`;
+        if (sec < 172800) return `${Math.round(sec / 3600)} 小时前`;
+        return `${Math.round(sec / 86400)} 天前`;
+      };
+      const current = transcript.currentSessionId;
+      const pinned = transcript.pinnedFile;
+      const sessions = transcript.listSessions(15);
+      type SessionItem = vscode.QuickPickItem & {
+        action: 'pin' | 'auto';
+        file?: string;
+        layout?: 'flat' | 'session-state';
+      };
+      const items: SessionItem[] = [
+        {
+          label: '$(sync) 自动跟随最新对话',
+          description: pinned ? '当前为固定模式，选这项恢复自动' : '默认行为',
+          action: 'auto',
+        },
+      ];
+      for (const session of sessions) {
+        const isCurrent = session.id === current;
+        const isPinned = !!pinned && pinned === session.file;
+        items.push({
+          label: `${isCurrent || isPinned ? '$(check) ' : '$(comment-discussion) '}${
+            session.title || session.id.slice(0, 8)
+          }`,
+          description: [
+            session.layout === 'session-state' ? 'agent' : '经典',
+            agoText(session.mtime),
+            session.workspace ? path.basename(session.workspace) : '',
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          detail: session.file,
+          action: 'pin',
+          file: session.file,
+          layout: session.layout,
+        });
+      }
+      const picked = await vscode.window.showQuickPick(items, {
+        title: '选择要镜像的对话',
+        placeHolder: `当前跟随：${current ? `${current.slice(0, 8)}${transcript.isAgentSession ? '（agent）' : ''}` : '未附加'}`,
+        matchOnDescription: true,
+        matchOnDetail: true,
+      });
+      if (!picked) {
+        return;
+      }
+      if (picked.action === 'auto') {
+        transcript.unpinSession();
+        updateStatus();
+        await vscode.window.showInformationMessage('已恢复自动跟随最新对话。');
+        return;
+      }
+      if (picked.file && picked.layout) {
+        transcript.pinSession(picked.file, picked.layout);
+        updateStatus();
+        await vscode.window.showInformationMessage(
+          `已固定镜像：${picked.label.replace(/\$\([a-z-]+\)\s*/g, '')}（后续只同步这一段对话）`,
+        );
+      }
+    }),
+    vscode.commands.registerCommand('ewwBridge.pickChat', async () => {
+      const agoText = (at: number): string => {
+        const sec = Math.max(0, Math.round((Date.now() - at) / 1000));
+        if (sec < 90) return `${sec}s 前`;
+        if (sec < 5400) return `${Math.round(sec / 60)} 分钟前`;
+        if (sec < 172800) return `${Math.round(sec / 3600)} 小时前`;
+        return `${Math.round(sec / 86400)} 天前`;
+      };
+      const bound = boundChatId();
+      const fallback = readConfig().defaultChatId || lastChatId;
+      type ChatItem = vscode.QuickPickItem & { action: 'pick' | 'manual' | 'unbind'; id?: string };
+      const items: ChatItem[] = [];
+      if (bound) {
+        items.push({
+          label: '$(circle-slash) 解除本工作区绑定',
+          description: `当前绑定 ${bound}`,
+          action: 'unbind',
+        });
+      }
+      for (const entry of recentChats()) {
+        items.push({
+          label: `${entry.id === (bound || fallback) ? '$(check) ' : '$(comment) '}${entry.id}`,
+          description: [agoText(entry.at), entry.workspace ? path.basename(entry.workspace) : '']
+            .filter(Boolean)
+            .join(' · '),
+          action: 'pick',
+          id: entry.id,
+        });
+      }
+      items.push({ label: '$(edit) 手动输入 chat_id…', action: 'manual' });
+      const picked = await vscode.window.showQuickPick(items, {
+        title: '选择推送会话（记忆到当前工作区）',
+        placeHolder: `当前使用：${targetChatId() || '未设置'}${bound ? '（本工作区绑定）' : ''}`,
+        matchOnDescription: true,
+      });
+      if (!picked) {
+        return;
+      }
+      if (picked.action === 'unbind') {
+        bindChatToWorkspace('');
+        await vscode.window.showInformationMessage(
+          `已解除本工作区绑定，改用全局默认：${readConfig().defaultChatId || lastChatId || '未设置'}`,
+        );
+        return;
+      }
+      if (picked.action === 'manual') {
+        const input = await vscode.window.showInputBox({
+          title: '推送目标 chat_id',
+          placeHolder: 'oc_xxxxxxxxxxxxxxxx',
+          ignoreFocusOut: true,
+        });
+        if (!input) {
+          return;
+        }
+        bindChatToWorkspace(input.trim());
+        await vscode.window.showInformationMessage(`已绑定当前工作区 → ${input.trim()}`);
+        return;
+      }
+      if (picked.id) {
+        bindChatToWorkspace(picked.id);
+        await vscode.window.showInformationMessage(`已绑定当前工作区 → ${picked.id}`);
       }
     }),
     vscode.commands.registerCommand('ewwBridge.dumpCurrentSession', async () => {

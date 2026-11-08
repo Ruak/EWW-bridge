@@ -84,6 +84,8 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 | `EWW Bridge: 显示状态` | Connection, session, queue, target chat |
 | `EWW Bridge: 发送测试消息` | Send a test card |
 | `EWW Bridge: 设置默认推送会话` | Choose the destination chat |
+| `EWW Bridge: 选择推送会话（按工作区记忆）` | Pick a target chat and remember it **for this workspace** |
+| `EWW Bridge: 选择要镜像的对话（切换同步对象）` | Pin which conversation gets mirrored (or go back to auto) |
 | `EWW Bridge: 显示日志` | Open the output channel |
 | `EWW Bridge: 解析当前会话(调试)` | Dump the parsed session summary |
 | `EWW Bridge: 模拟飞书下发(注入当前会话)` | Test inbound injection |
@@ -92,6 +94,16 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 | `EWW Bridge: 兼容性自检（VS Code 升级后用）` | Report whether every assumption still holds |
 
 The output channel also logs card updates with `(+XXms)` API round-trip timings.
+
+### Switching workspace or conversation
+
+- **Push target is remembered per workspace**: pick once with
+  `选择推送会话（按工作区记忆）`; after that, opening a different folder automatically uses that
+  folder's last chat. Resolution order: workspace binding → `feishu.defaultChatId` → last chat used.
+- **Mirror target**: `选择要镜像的对话（切换同步对象）` lists recent conversations (agent sessions
+  show their title and project) and pins the chosen one. Pick `自动跟随最新对话` to restore the
+  default "follow whatever is being written" behaviour. A pinned file that disappears falls back to
+  auto automatically.
 
 ## Copilot flush patch (recommended)
 

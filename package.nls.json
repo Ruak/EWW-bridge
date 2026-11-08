@@ -8,6 +8,8 @@
   "command.showLogs": "EWW Bridge: Show Logs",
   "command.dumpCurrentSession": "EWW Bridge: Dump Current Session (Debug)",
   "command.followLatestSession": "EWW Bridge: Follow Latest Session (use when a new chat does not sync)",
+  "command.pickSession": "EWW Bridge: Pick the Conversation to Mirror",
+  "command.pickChat": "EWW Bridge: Pick Push Target Chat (remembered per workspace)",
   "command.injectTest": "EWW Bridge: Simulate Feishu Message (Inject into Current Session)",
   "command.patchCopilotFlush": "EWW Bridge: Patch Built-in Copilot for Immediate Flush (Recommended)",
   "command.restoreCopilotFlush": "EWW Bridge: Restore Built-in Copilot Flush Patch",
