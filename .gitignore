@@ -8,3 +8,5 @@ out/
 Thumbs.db
 coverage/
 temp/
+.*.cmd
+.*.log
