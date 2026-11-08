@@ -1499,16 +1499,35 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const reply = (text: string) => feishu?.sendText(message.chatId, text);
     if (message.chatId) {
       rememberChat(message.chatId);
+      // 首次在某工作区收到消息：自动把这个会话绑到该工作区，省掉手动配置
+      if (!boundChatId()) {
+        const key = workspaceKey();
+        if (key) {
+          const next = { ...chatBindings(), [key]: message.chatId };
+          void context.globalState.update(WORKSPACE_CHAT_KEY, next);
+          log(`inbound: 自动把 ${message.chatId} 绑定到工作区 ${key}`);
+        }
+      }
       updateStatus();
     }
 
-    const config = readConfig();
-    if (config.allowedOpenIds.length === 0) {
-      await reply(`未配置白名单，已拒绝。\n你的 open_id：${message.openId}\n请加入设置 ewwBridge.security.allowedOpenIds`);
-      log(`inbound rejected (empty allowlist) open_id=${message.openId}`);
-      return;
-    }
-    if (!config.allowedOpenIds.includes(message.openId)) {
+    let config = readConfig();
+    const PAIRED_KEY = 'ewwBridge.pairedOpenIds';
+    const paired = (): string[] => {
+      const stored = context.globalState.get<string[]>(PAIRED_KEY);
+      return Array.isArray(stored) ? stored : [];
+    };
+    const allowed = new Set([...config.allowedOpenIds, ...paired()]);
+    if (allowed.size === 0) {
+      // 白名单为空 = 首次配对：自动信任来信者（存 globalState，不污染设置文件）
+      const next = Array.from(new Set([...paired(), message.openId]));
+      void context.globalState.update(PAIRED_KEY, next);
+      log(`inbound: 白名单为空，自动信任首个发送者 open_id=${message.openId}`);
+      await reply(
+        '已自动信任你的账号，并记住这个会话。\n之后直接发消息即可下发任务；需要限制他人时在设置 ewwBridge.security.allowedOpenIds 里维护。',
+      );
+      config = readConfig();
+    } else if (!allowed.has(message.openId)) {
       await reply(`未授权。\n你的 open_id：${message.openId}`);
       log(`inbound rejected (not allowed) open_id=${message.openId}`);
       return;
@@ -1655,33 +1674,157 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   };
 
   // ---------------- 命令 ----------------
+  const runCredentialSetup = async (): Promise<boolean> => {
+    const current = readConfig();
+    const appId = await vscode.window.showInputBox({
+      title: '飞书自建应用 · App ID',
+      value: current.appId,
+      ignoreFocusOut: true,
+      placeHolder: 'cli_xxxxxxxxxxxxxxxx',
+    });
+    if (!appId) {
+      return false;
+    }
+    const appSecret = await vscode.window.showInputBox({
+      title: '飞书自建应用 · App Secret',
+      password: true,
+      ignoreFocusOut: true,
+      placeHolder: '输入后存入 VS Code 密钥库',
+    });
+    if (!appSecret) {
+      return false;
+    }
+    await storeAppSecret(context, appSecret);
+    await updateSetting('feishu.appId', appId.trim());
+    return true;
+  };
+
   context.subscriptions.push(
     vscode.commands.registerCommand('ewwBridge.showLogs', () => initLog().show()),
+    // 唯一入口：状态 + 常用操作（其余细碎命令都收进这里，命令面板只留少数几条）
     vscode.commands.registerCommand('ewwBridge.showStatus', async () => {
-      await vscode.window.showInformationMessage('EWW Bridge', { modal: true, detail: statusText() }, '打开日志');
+      type Action = vscode.QuickPickItem & { run: () => unknown };
+      const state = feishu?.connectionState() ?? 'stopped';
+      const items: Action[] = [];
+      if (!readConfig().appId) {
+        items.push({
+          label: '$(gear) 快速设置…',
+          description: '填写 App ID / Secret 并连接飞书',
+          run: () => vscode.commands.executeCommand('ewwBridge.setup'),
+        });
+      }
+      items.push({
+        label: `$(broadcast) 连接：${STATE_LABEL[state] ?? state}`,
+        description: '选中查看日志',
+        run: () => initLog().show(),
+      });
+      items.push({
+        label: `$(comment) 推送会话：${targetChatId() || '未设置'}`,
+        description: boundChatId() ? '本工作区已绑定' : '全局默认',
+        run: () => vscode.commands.executeCommand('ewwBridge.pickChat'),
+      });
+      items.push({
+        label: `$(comment-discussion) 镜像对话：${
+          transcript?.pinnedFile ? `已固定 ${transcript.currentSessionId.slice(0, 8)}` : '自动跟随最新'
+        }`,
+        run: () => vscode.commands.executeCommand('ewwBridge.pickSession'),
+      });
+      if (feishu?.started) {
+        items.push({
+          label: '$(debug-disconnect) 断开飞书',
+          run: () => {
+            feishu?.stop();
+            feishu = undefined;
+            updateStatus();
+          },
+        });
+      } else {
+        items.push({
+          label: '$(plug) 连接飞书',
+          run: async () => {
+            await startFeishu();
+          },
+        });
+      }
+      items.push({
+        label: '$(mail) 发送测试消息',
+        run: () => vscode.commands.executeCommand('ewwBridge.testSend'),
+      });
+      if (copilotPatchStatus().state === 'clean') {
+        items.push({
+          label: '$(zap) 给内置 Copilot 打即时落盘补丁',
+          description: '推荐：长任务时卡片才能实时更新',
+          run: () => vscode.commands.executeCommand('ewwBridge.patchCopilotFlush'),
+        });
+      }
+      items.push({
+        label: '$(beaker) 兼容性自检',
+        run: () => vscode.commands.executeCommand('ewwBridge.compatCheck'),
+      });
+      const pairedIds = context.globalState.get<string[]>('ewwBridge.pairedOpenIds') || [];
+      if (pairedIds.length > 0) {
+        items.push({
+          label: `$(shield) 清除自动配对的白名单（${pairedIds.length} 人）`,
+          description: '清空后下一次发消息的用户会被重新信任',
+          run: async () => {
+            await context.globalState.update('ewwBridge.pairedOpenIds', undefined);
+            await vscode.window.showInformationMessage('已清除自动配对白名单。');
+          },
+        });
+      }
+      items.push({ label: '$(output) 打开日志', run: () => initLog().show() });
+      const picked = await vscode.window.showQuickPick(items, {
+        title: 'EWW Bridge',
+        placeHolder: statusText().replace(/\n/g, ' · '),
+        matchOnDescription: true,
+      });
+      if (picked?.run) {
+        await picked.run();
+      }
+    }),
+    vscode.commands.registerCommand('ewwBridge.setup', async () => {
+      if (!readConfig().appId || !(await getAppSecret(context))) {
+        const saved = await runCredentialSetup();
+        if (!saved) {
+          return;
+        }
+      }
+      await startFeishu();
+      const state = feishu?.connectionState() ?? 'stopped';
+      let patchNote = '';
+      const patchState = copilotPatchStatus();
+      if (patchState.state === 'clean') {
+        const patchNow = '打补丁';
+        const choice = await vscode.window.showInformationMessage(
+          '建议给内置 Copilot 打「即时落盘」补丁：长任务（后台命令）期间飞书卡片才能实时更新。',
+          patchNow,
+          '跳过',
+        );
+        if (choice === patchNow) {
+          const outcome = applyCopilotPatch();
+          patchNote = outcome.ok ? '已打补丁，重载窗口后生效' : `补丁失败：${outcome.message}`;
+        }
+      }
+      if (!targetChatId()) {
+        await vscode.window.showInformationMessage(
+          '最后一步：在飞书里给机器人随便发一条消息。\n首次会自动信任你的账号并记住这个会话，之后直接发任务即可。',
+        );
+      }
+      await vscode.window.showInformationMessage(
+        [
+          'EWW Bridge 设置完成',
+          `飞书连接：${STATE_LABEL[state] ?? state}`,
+          `推送会话：${targetChatId() || '等待飞书首条消息自动配对'}`,
+          patchNote,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+      );
     }),
     vscode.commands.registerCommand('ewwBridge.setCredentials', async () => {
-      const current = readConfig();
-      const appId = await vscode.window.showInputBox({
-        title: '飞书自建应用 · App ID',
-        value: current.appId,
-        ignoreFocusOut: true,
-        placeHolder: 'cli_xxxxxxxxxxxxxxxx',
-      });
-      if (!appId) {
+      if (!(await runCredentialSetup())) {
         return;
       }
-      const appSecret = await vscode.window.showInputBox({
-        title: '飞书自建应用 · App Secret',
-        password: true,
-        ignoreFocusOut: true,
-        placeHolder: '输入后存入 VS Code 密钥库',
-      });
-      if (!appSecret) {
-        return;
-      }
-      await storeAppSecret(context, appSecret);
-      await updateSetting('feishu.appId', appId.trim());
       await startFeishu();
       await vscode.window.showInformationMessage('凭据已保存，飞书长连接已启动。');
     }),

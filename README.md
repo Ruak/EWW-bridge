@@ -35,7 +35,8 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 | Reload safe | Card id + request index persisted; a reload keeps patching the same card |
 | Feishu-friendly formatting | Headings → bold, tables → bullets, code blocks → compact placeholder, local `file://` links → readable paths |
 | No thinking noise | `forward.thinking` defaults to `false`; enable it for a collapsed thoughts panel |
-| Secure | App secret in VS Code SecretStorage, open_id allowlist, optional command prefix |
+| Zero-config pairing | First message from Feishu is trusted automatically; the chat is bound to the workspace |
+| Secure | App secret in VS Code SecretStorage, optional allowlist / command prefix |
 
 ## Requirements
 
@@ -77,23 +78,30 @@ Copilot Chat ──realtime──▶ chatSessions / transcripts ──▶ EWW Br
 
 ## Commands
 
+Only five entries show up in the Command Palette — everything else lives inside the two pickers:
+
 | Command | Description |
 |---|---|
-| `EWW Bridge: 设置飞书应用凭据` | Store App ID / App Secret |
-| `EWW Bridge: 连接飞书` / `断开飞书` | Start / stop the long connection |
-| `EWW Bridge: 显示状态` | Connection, session, queue, target chat |
-| `EWW Bridge: 发送测试消息` | Send a test card |
-| `EWW Bridge: 设置默认推送会话` | Choose the destination chat |
+| `EWW Bridge: 快速设置（从这里开始）` | Wizard: credentials → connect → optional flush patch → first-message pairing |
+| `EWW Bridge: 状态与操作` | Status plus actions (connect / disconnect / test message / patch / self-check / logs) |
 | `EWW Bridge: 选择推送会话（按工作区记忆）` | Pick a target chat and remember it **for this workspace** |
 | `EWW Bridge: 选择要镜像的对话（切换同步对象）` | Pin which conversation gets mirrored (or go back to auto) |
 | `EWW Bridge: 显示日志` | Open the output channel |
-| `EWW Bridge: 解析当前会话(调试)` | Dump the parsed session summary |
-| `EWW Bridge: 模拟飞书下发(注入当前会话)` | Test inbound injection |
-| `EWW Bridge: 给内置 Copilot 打即时落盘补丁（推荐）` | Make Copilot flush its transcript immediately (see below) |
-| `EWW Bridge: 还原内置 Copilot 落盘补丁` | Restore the original Copilot bundle |
-| `EWW Bridge: 兼容性自检（VS Code 升级后用）` | Report whether every assumption still holds |
+
+Advanced/debug commands (`设置凭据`、`连接/断开`、`发送测试`、`解析会话`、`模拟下发`、`跟随最新`、
+`打/还原补丁`、`兼容性自检`) are hidden from the palette but still work if you bind them to a key or
+call them from another extension — they are all reachable through `状态与操作`.
 
 The output channel also logs card updates with `(+XXms)` API round-trip timings.
+
+### Zero-config pairing (no allowlist editing)
+
+- No `security.allowedOpenIds` needed: when the list is empty the **first person who messages the
+  bot is trusted automatically** (stored in VS Code global state, never written into your settings).
+- The chat is remembered too: the first message in a workspace binds that chat to the workspace, so
+  later you never have to configure anything when switching projects.
+- To lock the bot down later, either fill `security.allowedOpenIds` (works alongside the paired ids)
+  or use `状态与操作 → 清除自动配对的白名单`.
 
 ### Switching workspace or conversation
 
@@ -176,7 +184,7 @@ versions, patch state, session directories, event-type counts and a one-line ver
 | `ewwBridge.forward.thinking` | `false` | Mirror reasoning (collapsed panel) |
 | `ewwBridge.forward.progress` | `true` | Show recent tool activity |
 | `ewwBridge.forward.toolCalls` | `false` | Show full tool list |
-| `ewwBridge.security.allowedOpenIds` | `[]` | open_id allowlist (empty = deny all) |
+| `ewwBridge.security.allowedOpenIds` | `[]` | Extra allowed `open_id`s (empty = auto-trust the first sender) |
 | `ewwBridge.security.prefix` | `""` | Optional command prefix, e.g. `#ai` |
 | `ewwBridge.inject.newChat` | `false` | Start a new session per task |
 | `ewwBridge.inject.timeoutMs` | `900000` | Max wait for a turn to finish |

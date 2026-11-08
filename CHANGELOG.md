@@ -2,6 +2,41 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.1.8 — 配置再简化：5 个命令 + 零配置配对
+
+> **English summary** — ① the Command Palette now shows only **5** entries (Quick Setup, Status &
+> Actions, Pick Push Chat, Pick Mirror Conversation, Show Logs); the other 11 are still registered
+> but hidden from the palette and reachable from *Status & Actions*. ② **No more allowlist
+> editing**: an empty allowlist now auto-trusts the first sender (kept in global state) instead of
+> rejecting with “未配置白名单”, and the first message in a workspace also binds that chat to the
+> workspace.
+
+### 白名单：不再报“未配置白名单”
+
+- 原因是白名单为空时**直接拒绝**所有入站消息。现在改为**首次自动配对**：
+  - 白名单为空 → 自动信任来信者，记到 VS Code `globalState`（`ewwBridge.pairedOpenIds`），
+    不往设置文件里写东西；回一条“已自动信任你的账号，并记住这个会话”。
+  - 与 `security.allowedOpenIds` **并存**：想加人/收紧权限再填设置；也可以在
+    `状态与操作 → 清除自动配对的白名单` 里一键清空。
+- 顺带：首次在某工作区收到飞书消息时，自动把该会话**绑定到当前工作区**，
+  之后切项目不用再选推送会话。
+
+### 命令精简：15 → 5
+
+命令面板只保留：
+
+| 命令 | 作用 |
+|---|---|
+| `EWW Bridge: 快速设置（从这里开始）` | 一次走完：填 App ID/Secret → 连接 → （可选）打落盘补丁 → 提示首条消息配对 |
+| `EWW Bridge: 状态与操作` | 状态 + 连接/断开、发送测试、打补丁、兼容性自检、打开日志、清除配对 |
+| `EWW Bridge: 选择推送会话（按工作区记忆）` | 切换推送目标 |
+| `EWW Bridge: 选择要镜像的对话（切换同步对象）` | 切换镜像的对话 |
+| `EWW Bridge: 显示日志` | 日志 |
+
+其余 11 条（设置凭据、连接/断开、发送测试、设置默认会话、解析会话、模拟下发、跟随最新、打/还原补丁、
+兼容性自检）仍然注册可用，但通过 `menus.commandPalette` 的 `when: false` **从命令面板隐藏**，
+全部可从「状态与操作」进入。
+
 ## 1.1.7 — 偶发“进行中”多余卡片 + 一键切换工作区/对话
 
 > **English summary** — ① **stray “进行中” card**: a placeholder bound to an old session key could

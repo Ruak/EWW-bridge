@@ -2,7 +2,8 @@
   "command.setCredentials": "EWW Bridge: Set Feishu App Credentials",
   "command.connect": "EWW Bridge: Connect to Feishu",
   "command.disconnect": "EWW Bridge: Disconnect from Feishu",
-  "command.showStatus": "EWW Bridge: Show Status",
+  "command.setup": "EWW Bridge: Quick Setup (start here)",
+  "command.showStatus": "EWW Bridge: Status & Actions",
   "command.testSend": "EWW Bridge: Send Test Message",
   "command.setDefaultChat": "EWW Bridge: Set Default Chat",
   "command.showLogs": "EWW Bridge: Show Logs",
@@ -27,7 +28,7 @@
   "config.forward.streamingIntervalMs": "Minimum interval between card updates (ms). Smaller is more real-time; too small may hit Feishu rate limits.",
   "config.forward.patchStreamText": "Prepend answer text from the chatSessions patch stream (only when the card already has text with a matching prefix). Disable to turn this off.",
   "config.forward.idleMs": "How many milliseconds of silence mark a turn as finished and trigger a push.",
-  "config.security.allowedOpenIds": "Allow-listed Feishu `open_id`s that may send tasks. When empty, every inbound message is rejected and the sender's `open_id` is echoed back.",
+  "config.security.allowedOpenIds": "Allow-listed Feishu `open_id`s that may send tasks. You usually do not need to touch this: when the list is empty the first person who messages the bot is trusted automatically (stored locally, not in settings). Fill it in only to add more people or to lock the bot down.",
   "config.security.prefix": "Inbound command prefix (e.g. `#ai`). Leave empty to require no prefix; the allowlist still applies.",
   "config.inject.newChat": "`true`: start a new chat for every Feishu task. `false`: append to the current chat.",
   "config.inject.timeoutMs": "Maximum time (ms) to wait for one task to finish; the queue continues afterwards."

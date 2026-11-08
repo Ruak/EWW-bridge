@@ -2,7 +2,7 @@
   "name": "eww-bridge",
   "displayName": "EWW Bridge — Copilot Chat to Feishu / Lark",
   "description": "Stream your active VS Code Copilot Chat session to a Feishu/Lark card in real time, and send new tasks from Feishu back into the same chat session.",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "publisher": "huangdan",
   "license": "MIT",
   "icon": "assets/icon.png",
@@ -41,6 +41,26 @@
   "contributes": {
     "commands": [
       {
+        "command": "ewwBridge.setup",
+        "title": "%command.setup%"
+      },
+      {
+        "command": "ewwBridge.showStatus",
+        "title": "%command.showStatus%"
+      },
+      {
+        "command": "ewwBridge.pickChat",
+        "title": "%command.pickChat%"
+      },
+      {
+        "command": "ewwBridge.pickSession",
+        "title": "%command.pickSession%"
+      },
+      {
+        "command": "ewwBridge.showLogs",
+        "title": "%command.showLogs%"
+      },
+      {
         "command": "ewwBridge.setCredentials",
         "title": "%command.setCredentials%"
       },
@@ -53,10 +73,6 @@
         "title": "%command.disconnect%"
       },
       {
-        "command": "ewwBridge.showStatus",
-        "title": "%command.showStatus%"
-      },
-      {
         "command": "ewwBridge.testSend",
         "title": "%command.testSend%"
       },
@@ -65,24 +81,12 @@
         "title": "%command.setDefaultChat%"
       },
       {
-        "command": "ewwBridge.showLogs",
-        "title": "%command.showLogs%"
-      },
-      {
         "command": "ewwBridge.dumpCurrentSession",
         "title": "%command.dumpCurrentSession%"
       },
       {
         "command": "ewwBridge.followLatestSession",
         "title": "%command.followLatestSession%"
-      },
-      {
-        "command": "ewwBridge.pickSession",
-        "title": "%command.pickSession%"
-      },
-      {
-        "command": "ewwBridge.pickChat",
-        "title": "%command.pickChat%"
       },
       {
         "command": "ewwBridge.injectTest",
@@ -101,6 +105,54 @@
         "title": "%command.compatCheck%"
       }
     ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "ewwBridge.setCredentials",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.connect",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.disconnect",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.testSend",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.setDefaultChat",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.dumpCurrentSession",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.followLatestSession",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.injectTest",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.patchCopilotFlush",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.restoreCopilotFlush",
+          "when": "false"
+        },
+        {
+          "command": "ewwBridge.compatCheck",
+          "when": "false"
+        }
+      ]
+    },
     "configuration": {
       "title": "EWW Bridge",
       "properties": {
