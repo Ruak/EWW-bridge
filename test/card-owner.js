@@ -74,4 +74,45 @@ expect(
   'release',
 );
 
-console.log('PASS: 同一提问复用同一张卡（占位/多帧/下标错位），新提问才换卡');
+// ---- 新回合不能携带上一轮正文 ----
+const { samePromptTurn, resetTurnText } = require('../out/cardLifecycle.js');
+const pickLonger = (a, b) => ((a || '').length >= (b || '').length ? a : b);
+
+const prevTurn = {
+  promptText: '旧问题：帮我统计昨天的日志',
+  lastAnswerText: '这是上一轮的完整回答，长度明显更长，绝不能出现在新卡片里。'.repeat(3),
+  softFinalText: '上一轮软结束文本',
+  answerFloorLen: 120,
+  pendingTextLen: 120,
+  lastSentTextLen: 120,
+  persistedTextLen: 120,
+  doneAt: Date.now(),
+  requestIndex: 7,
+  patches: 5,
+};
+const newPrompt = '新问题：把这份报告导出成 PDF';
+if (samePromptTurn(prevTurn, newPrompt)) {
+  fail('不同提问不应被判为同一轮');
+}
+if (!samePromptTurn(prevTurn, '旧问题：帮我统计昨天的日志  ')) {
+  fail('仅空白差异的同一提问应判为同一轮');
+}
+if (!samePromptTurn(prevTurn, '') || !samePromptTurn({}, newPrompt)) {
+  fail('没有提问文本时不应重置（保持旧行为）');
+}
+
+resetTurnText(prevTurn, newPrompt);
+for (const key of ['lastAnswerText', 'softFinalText', 'doneAt', 'requestIndex']) {
+  if (prevTurn[key] !== undefined) {
+    fail(`resetTurnText 未清空 ${key}`);
+  }
+}
+if (prevTurn.promptText !== newPrompt) {
+  fail('resetTurnText 未更新 promptText');
+}
+const newText = '新回合的短回答。';
+if (pickLonger(newText, prevTurn.lastAnswerText ?? '') !== newText) {
+  fail('清空后新回合正文不应被上一轮文本覆盖');
+}
+
+console.log('PASS: 同一提问复用同一张卡（占位/多帧/下标错位），新提问才换卡；新回合不携带上一轮正文');

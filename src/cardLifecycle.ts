@@ -41,3 +41,45 @@ export function decideUserPromptTurn(
   }
   return 'reset';
 }
+
+/** 卡片状态里与本轮正文相关的字段（resetTurnText 会清空它们） */
+export interface TurnTextSnapshot {
+  promptText?: string;
+  lastAnswerText?: string;
+  softFinalText?: string;
+  answerFloorLen?: number;
+  pendingTextLen?: number;
+  lastSentTextLen?: number;
+  persistedTextLen?: number;
+  doneAt?: number;
+  requestIndex?: number;
+  lastEventAt?: number;
+}
+
+/**
+ * 当前状态是否仍属于“这一轮提问”。空 promptText（旧状态/未记录）视为同一轮，保持旧行为。
+ */
+export function samePromptTurn(state: { promptText?: string } | undefined, prompt: string): boolean {
+  if (!state || !state.promptText || !prompt) {
+    return true;
+  }
+  return normalizePrompt(state.promptText) === normalizePrompt(prompt);
+}
+
+/**
+ * 清掉上一轮残留的快照。
+ * transcript 可能还没触发新提问回调（或没来得及换卡）就先送来了新回合的正文，
+ * 此时若沿用 lastAnswerText/softFinalText，新卡会顶上一轮的答案（实测事故）。
+ */
+export function resetTurnText(state: TurnTextSnapshot, prompt: string): void {
+  state.promptText = prompt || undefined;
+  state.lastAnswerText = undefined;
+  state.softFinalText = undefined;
+  state.answerFloorLen = 0;
+  state.pendingTextLen = 0;
+  state.lastSentTextLen = undefined;
+  state.persistedTextLen = 0;
+  state.doneAt = undefined;
+  state.requestIndex = undefined;
+  state.lastEventAt = Date.now();
+}

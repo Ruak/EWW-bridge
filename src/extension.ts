@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { buildCompatReport } from './compat';
-import { decideUserPromptTurn } from './cardLifecycle';
+import { decideUserPromptTurn, resetTurnText, samePromptTurn } from './cardLifecycle';
 import {
   getAppSecret,
   readConfig,
@@ -841,6 +841,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       const state = activeStreams.get(event.sessionId);
       const aborted = event.aborted === true;
+      // 新回合但卡片状态还没换：先清掉上一轮快照，否则软结束会把旧答案定稿到新卡
+      const currentPrompt = transcript?.currentPrompt ?? '';
+      if (state && !samePromptTurn(state, currentPrompt)) {
+        log('outbound: 检测到新一轮提问，清空上一轮正文快照（软结束）');
+        resetTurnText(state, currentPrompt);
+      }
       const softAnswer0 = mergedAnswer(event.text, state?.requestIndex);
       if (!softAnswer0.trim() && !aborted) {
         // 只有思考/工具、还没正文：保持“处理中”，不要把卡片收尾成“没有文字输出”
@@ -1019,6 +1025,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void (async () => {
         try {
           const existing = activeStreams.get(event.sessionId);
+          // 新回合但卡片状态还没换：先清掉上一轮快照，否则 pickLonger 会把旧答案留在新卡上
+          const currentPrompt = transcript?.currentPrompt ?? '';
+          if (existing && !samePromptTurn(existing, currentPrompt)) {
+            log('outbound: 检测到新一轮提问，清空上一轮正文快照（增量）');
+            resetTurnText(existing, currentPrompt);
+          }
           const answer = pickLonger(mergedAnswer(event.text, existing?.requestIndex), existing?.lastAnswerText ?? '');
           if (regressedAnswer(existing, answer)) {
             return;
@@ -1621,9 +1633,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const sessionId = outboundSessionId();
           if (streamChatId && sessionId) {
             const previous = activeStreams.get(sessionId);
-            if (previous?.doneAt) {
-              // 上一轮已定稿：释放卡片状态，本轮重新建卡
-              activeStreams.delete(sessionId);
+            // 新任务进来时上一轮必须收尾（保留它自己的内容），否则新卡会继承旧正文
+            const previousHasContent = !!(previous?.lastAnswerText || previous?.softFinalText);
+            if (previous && (!samePromptTurn(previous, text) || previous.doneAt || previousHasContent)) {
+              retireStreamCard(sessionId, previous, '（已开始新一轮，本卡片停止更新。）');
               clearStreamState();
             }
             void pushStreamCard(

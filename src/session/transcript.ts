@@ -89,6 +89,8 @@ export class TranscriptWatcher {
   private toolInFlightCount = 0;
   private toolStarts = new Map<string, ToolActivity>();
   private lastLoggedTextLen = 0;
+  /** 本轮用户提问原文（新回合开始时更新） */
+  private currentPromptText = '';
 
   onDelta?: (event: StreamDelta) => void;
   onSoftFinal?: (event: StreamDelta) => void;
@@ -123,6 +125,11 @@ export class TranscriptWatcher {
 
   get lastActivity(): number {
     return this.lastEventAt;
+  }
+
+  /** 本轮提问原文（用于卡片归属判断；空串表示还没看到提问） */
+  get currentPrompt(): string {
+    return this.currentPromptText;
   }
 
   get deltaCount(): number {
@@ -198,6 +205,7 @@ export class TranscriptWatcher {
     this.thinking = '';
     this.text = '';
     this.tools = [];
+    this.currentPromptText = '';
     this.dirty = false;
     this.lastEmitAt = 0;
     this.turnEndedAt = 0;
@@ -533,6 +541,10 @@ export class TranscriptWatcher {
         if (!this.silent) {
           this.onUserPrompt?.({ sessionId: this.sessionId, text: content });
         }
+      }
+      // 记下本轮提问原文：卡片侧用它判断“这一帧属于哪一轮”，避免新卡带上上一轮正文
+      if (content) {
+        this.currentPromptText = content;
       }
       // 新回合开始：清空上一轮累计，避免新卡片带上旧内容
       this.thinking = '';

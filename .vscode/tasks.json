@@ -115,6 +115,16 @@
 				"E:\\repo\\EWW\\.r2.cmd"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "release 1.1.11",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.r3.cmd"
+			],
+			"isBackground": false
 		}
 	]
 }
