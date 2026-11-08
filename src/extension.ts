@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { buildCompatReport } from './compat';
+import { decideUserPromptTurn } from './cardLifecycle';
 import {
   getAppSecret,
   readConfig,
@@ -36,6 +37,9 @@ const STATE_LABEL: Record<string, string> = {
   idle: '空闲',
   stopped: '未启动',
 };
+
+/** 当前界面语言（中文环境为 zh-cn；扩展宿主测试桩里 env 可能不存在） */
+const uiLanguage = (): string => (vscode.env && vscode.env.language) || 'en';
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   initLog();
@@ -176,7 +180,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       `注入队列: ${injector.pending}`,
       `推送目标: ${targetChatId() || '未设置'}${boundChatId() ? '（本工作区已绑定）' : ''}`,
       `注入方式: ${readConfig().newChat ? '每次新会话' : '追加当前会话'}`,
-      `界面语言: ${vscode.env.language}${vscode.env.language.startsWith('zh') ? '' : '（命令标题会显示英文）'}`,
+      `界面语言: ${uiLanguage()}${uiLanguage().startsWith('zh') ? '' : '（命令标题会显示英文）'}`,
       lastStartError ? `最近错误: ${lastStartError}` : '',
     ]
       .filter(Boolean)
@@ -240,6 +244,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     lastTools?: string[];
     /** 最近一次真正收到本会话事件的时间（心跳/建卡区间不算），用于判定陈旧状态 */
     lastEventAt?: number;
+    /** 本轮的用户提问原文：transcript 与 chatSessions 会各看到一次，同文本必须复用同一张卡 */
+    promptText?: string;
     /** 诊断：待发送正文长度 / 已发送正文长度 */
     pendingTextLen?: number;
     lastSentTextLen?: number;
@@ -903,25 +909,21 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     transcript.onUserPrompt = (event) => {
       // 新一轮开始：上一轮的卡片要么已软结束（保留终稿），要么立即收尾，避免被新回合覆盖
       const previous = activeStreams.get(event.sessionId);
-      // 刚注入时建的占位卡（还没有任何内容）才属于这一轮；有内容的卡说明上一轮已完成，必须释放
-      const hasContent =
-        !!previous &&
-        (!!previous.softFinalText ||
-          !!previous.doneAt ||
-          previous.patches > 1 ||
-          (previous.lastAnswerText ?? '').length > 0);
-      if (previous && hasContent) {
-        // 直接释放状态，保留上一轮卡片原样（不再用状态卡覆盖长回答）
-        stopHeartbeat(event.sessionId);
-        activeStreams.delete(event.sessionId);
+      const decision = decideUserPromptTurn(previous, event.text, undefined);
+      if (previous && decision === 'release') {
+        retireStreamCard(event.sessionId, previous, '（已开始新一轮，本卡片停止更新。）');
       } else if (previous) {
-        // 占位卡延续，但新回合不能带上一轮的任何正文快照
-        previous.lastAnswerText = undefined;
-        previous.softFinalText = undefined;
-        previous.answerFloorLen = 0;
-        previous.pendingTextLen = 0;
-        previous.lastSentTextLen = undefined;
-        previous.persistedTextLen = 0;
+        previous.promptText = event.text;
+        previous.lastEventAt = Date.now();
+        if (decision === 'reset') {
+          // 占位卡延续，但新回合不能带上一轮的任何正文快照
+          previous.lastAnswerText = undefined;
+          previous.softFinalText = undefined;
+          previous.answerFloorLen = 0;
+          previous.pendingTextLen = 0;
+          previous.lastSentTextLen = undefined;
+          previous.persistedTextLen = 0;
+        }
       }
       // transcript 只知“何时看到提问”，chatSessions 的 request.timestamp 才是回合起点：同一个回合内取较早值
       const now = Date.now();
@@ -956,6 +958,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!created.turnStartedAt) {
             created.turnStartedAt = now;
           }
+          created.promptText = event.text;
+          created.lastEventAt = now;
           if (created.messageId) {
             saveStreamState(event.sessionId, created.messageId, created.requestIndex, created.lastAnswerText);
           }
@@ -1165,20 +1169,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const sameTurn = promptStart > 0 && Math.abs(eventStart - promptStart) < 600000;
       lastTurnStartedAt.set(event.sessionId, sameTurn ? Math.min(promptStart, eventStart) : eventStart);
       let stream = activeStreams.get(event.sessionId);
-      // 卡片上已经有内容（正文/软结束/已多次 patch/已定稿）时，新提问必须换新卡，否则短回答会覆盖上一轮长回答
+      // 卡片上已经有内容时，新提问必须换新卡，否则短回答会覆盖上一轮长回答。
+      // 但同一个提问会被 transcript 与 chatSessions 各看到一次（注入文本尤其明显）：
+      // 文本相同就说明是同一回合，绝不能换卡，否则同一问题会并排出现两张“处理中”。
       if (stream) {
-        const hasContent =
-          !!stream.softFinalText ||
-          !!stream.doneAt ||
-          stream.patches > 1 ||
-          (stream.lastAnswerText ?? '').length > 0;
-        const changedTurn = stream.requestIndex !== undefined && stream.requestIndex !== event.index;
-        if (hasContent || changedTurn) {
-          log(`outbound: 新一轮 #${event.index}，上一轮的卡片已保留（不再覆盖）`);
-          stopHeartbeat(event.sessionId);
-          activeStreams.delete(event.sessionId);
-          clearStreamState();
-          stream = undefined;
+        switch (decideUserPromptTurn(stream, event.text, event.index)) {
+          case 'release':
+            log(`outbound: 新一轮 #${event.index}，上一轮的卡片收尾（不再覆盖）`);
+            retireStreamCard(event.sessionId, stream, '（已开始新一轮，本卡片停止更新。）');
+            clearStreamState();
+            stream = undefined;
+            break;
+          case 'reuse':
+            log(`outbound: 同一提问（#${event.index}）已由 transcript 建卡，沿用原卡片`);
+            stream.promptText = event.text;
+            stream.lastEventAt = Date.now();
+            if (stream.requestIndex !== event.index) {
+              stream.requestIndex = event.index;
+            }
+            break;
+          default:
+            break;
         }
       }
       if (stream) {
@@ -1234,6 +1245,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           if (!created.turnStartedAt) {
             created.turnStartedAt = eventStart;
           }
+          created.promptText = event.text;
+          created.lastEventAt = Date.now();
           if (created.messageId) {
             saveStreamState(event.sessionId, created.messageId, created.requestIndex);
           }
@@ -1622,7 +1635,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 expanded: false,
                 showThinking: config.forwardThinking,
               }),
-            );
+            ).then((created) => {
+              // 记下本次提问：transcript / chatSessions 稍后看到同一条文本时必须复用这张卡
+              created.promptText = text;
+              created.lastEventAt = Date.now();
+            });
           }
         }
       },
@@ -1774,9 +1791,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           },
         });
       }
-      if (!vscode.env.language.startsWith('zh')) {
+      if (!uiLanguage().startsWith('zh')) {
         items.push({
-          label: `$(globe) 切换界面语言为中文（当前 ${vscode.env.language}）`,
+          label: `$(globe) 切换界面语言为中文（当前 ${uiLanguage()}）`,
           description: '写入 argv.json，需要完全退出并重新打开 VS Code',
           run: async () => {
             const userData = context.globalStorageUri?.fsPath
@@ -2209,10 +2226,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       );
       // 语言诊断：命令标题的中文来自 package.nls.<language>.json，语言对不上就只能显示英文
       try {
-        const lang = vscode.env.language || 'en';
-        const nlsFile = path.join(context.extensionPath, `package.nls.${lang}.json`);
+        const lang = uiLanguage();
+        const nlsFile = context.extensionPath ? path.join(context.extensionPath, `package.nls.${lang}.json`) : '';
         log(
-          `i18n: language=${lang} nls=${fs.existsSync(nlsFile) ? 'ok' : 'missing'}` +
+          `i18n: language=${lang} nls=${nlsFile ? (fs.existsSync(nlsFile) ? 'ok' : 'missing') : 'unknown'}` +
             `（界面中文但命令英文时，检查 argv.json 的 locale 与语言包版本）`,
         );
       } catch (error) {

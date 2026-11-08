@@ -2,6 +2,44 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.1.10 — 修复“同一个提问出现两张处理中卡片”
+
+> **English summary** — the same prompt is observed twice (transcript stream + `chatSessions` patch
+> stream, plus an echo for injected messages). The old rule “card already has content → start a new
+> card” therefore created a **second** card for the same question. Ownership is now decided by the
+> **prompt text**: identical text reuses the existing card (only the request index is refreshed);
+> a genuinely new prompt retires the old card as `已完成` instead of leaving it frozen at `处理中…`.
+
+### 根因
+
+一条提问会被两个数据源各看到一次：
+
+- `transcript`（实时源）→ 立即建卡并流式更新；
+- `chatSessions`（补丁流）→ 几十秒后才出现同一条 `user.message`。
+
+旧逻辑只看“卡片是否已有内容”，于是 chatSessions 迟到时判定为“新一轮”，把状态删掉重建 →
+飞书里同一问题并排出现 **两张** `Copilot · 处理中…`（一张停在旧进度、一张继续）。
+
+### 修复
+
+- 新增 `src/cardLifecycle.ts`：`decideUserPromptTurn()` 以**提问原文**为第一判据
+  （忽略空白差异）——文本相同 = 同一回合 → `reuse`；真正的新提问且有内容 → `release`；
+  空占位卡遇到新提问 → `reset`。
+- `promptText` 在建卡时写入（注入占位卡 / transcript 占位卡 / chatSessions 占位卡三条路径都记录）。
+- 判定为 `release` 时不再“静默丢弃”旧卡，而是用 `retireStreamCard()` 收尾（有正文则定稿，
+  无正文则写明停止更新），避免留下永远“处理中”的孤儿卡。
+- 新增 `test/card-owner.js`，覆盖占位卡、多帧、下标错位、真正新提问、旧卡已定稿、无 promptText 等场景。
+
+### 其他
+
+- `package.json` 的 `test` 脚本加入 `card-owner.js`。
+- 界面语言诊断改为安全的 `uiLanguage()`（`vscode.env` 缺失时不再报错）。
+
+## 1.1.9 — 界面语言诊断
+
+> 新增 `i18n: language=<lang> nls=ok|missing` 激活日志、`状态与操作` 里的「界面语言」行，
+> 以及非中文环境下的一键「切换界面语言为中文」（写 `argv.json` 的 `locale`）。
+
 ## 1.1.8 — 配置再简化：5 个命令 + 零配置配对
 
 > **English summary** — ① the Command Palette now shows only **5** entries (Quick Setup, Status &

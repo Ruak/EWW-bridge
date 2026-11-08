@@ -85,6 +85,36 @@
 				"E:\\repo\\EWW\\.c3.cmd"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "tests 1.1.10",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.t2.cmd"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "build+test 1.1.10",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.t3.cmd"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "release 1.1.10",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.r2.cmd"
+			],
+			"isBackground": false
 		}
 	]
 }
