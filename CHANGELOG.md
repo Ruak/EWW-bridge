@@ -2,6 +2,30 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.1.12 — 终稿只保留最终答复；"已完成"不再提前出现
+
+> **English summary** — ① in agent sessions the final answer lives in `task_complete.summary`; it is
+> now **replaced** into the card instead of being appended to the step-by-step narration, so the
+> final card no longer mixes process chatter with the answer. ② agent sessions emit `turn_end` for
+> **every model step**, so the card used to flash `已完成` mid-turn: a turn now counts as running for
+> 1.8 s after any `turn_end`, and the "settled" check waits 2.5 s in agent sessions.
+
+### 非正文内容进入卡片
+
+- 根因：agent 会话的最终答复在 `task_complete.summary`。之前是**追加**到已累计的过程正文后面，
+  卡片就变成「过程解说（Now let me update…）+ 最终总结（迁移摘要/检查点表）」。
+- 现在 summary 到达时**替换**正文（`appendFinalAnswer` 直接赋值，重复 summary 只保留一份），
+  过程中仍会实时显示旁白，但定稿时只留最终答复。
+
+### 会话未结束却显示“已完成”
+
+- 根因：agent 会话每一步都会写 `assistant.turn_end`，`isTurnRunning()` 在步与步之间为 false，
+  于是任意一帧（软结束/工具/心跳）都会把卡片刷成 `Copilot · 已完成 · Ns`。
+- 现在：
+  - `transcript.recentlyEnded`：`turn_end` 后 1.8s 内仍按“处理中”渲染，避免逐步闪烁；
+  - agent 会话（`session-state`）的软结束静默窗口从 0.8s 提到 **2.5s**，只有真正不再有新事件
+    才定稿成“已完成”。
+
 ## 1.1.11 — 新回复卡片不再携带上一条回复
 
 > **English summary** — when a new turn started, the stream state still held the previous turn's

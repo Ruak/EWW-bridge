@@ -59,8 +59,12 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   if (!last.text.includes('全部容器运行正常')) {
     throw new Error(`最终答复缺失 task_complete summary：${JSON.stringify(last.text)}`);
   }
-  if (!last.text.startsWith('先看容器状态。')) {
-    throw new Error(`过程正文丢失：${JSON.stringify(last.text)}`);
+  // summary 是最终答复：必须**替换**过程中的旁白，而不是拼接（否则卡片像混进非正文内容）
+  if (last.text.includes('先看容器状态。')) {
+    throw new Error(`过程旁白没有被替换：${JSON.stringify(last.text)}`);
+  }
+  if (last.text.trim() !== summary.trim()) {
+    throw new Error(`最终正文应等于 summary，实际：${JSON.stringify(last.text)}`);
   }
   if (last.tools.includes('task_complete')) {
     throw new Error('task_complete 不应作为工具展示');
@@ -73,11 +77,11 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   if (after.text.split('全部容器运行正常').length - 1 !== 1) {
     throw new Error(`汇总文案被重复追加：${JSON.stringify(after.text.slice(-120))}`);
   }
-  if (after.text.trim().length < before.length) {
-    throw new Error('最终答复变短');
+  if (after.text.trim() !== before) {
+    throw new Error('重复 summary 事件导致正文变化');
   }
   watcher.stop();
-  console.log('PASS: agent task_complete 最终答复纳入同步且不重复');
+  console.log('PASS: agent 最终答复用 task_complete summary 替换过程旁白且不重复');
 })().catch((error) => {
   console.error('FAIL:', error.message);
   process.exit(1);

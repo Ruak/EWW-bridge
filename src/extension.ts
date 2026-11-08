@@ -441,7 +441,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
    * 每步工具调用的 turn_end 不是整轮结束，按事件类型决定标题会让卡片在“处理中/已完成”之间反复。
    */
   const runningLook = (): { running: boolean; title: string; footer: string } => {
-    const running = transcript?.isTurnRunning() ?? false;
+    // agent 会话每一步都有 turn_end：刚结束时先别急着标“已完成”，否则整轮还在跑就闪成完成态
+    const running = (transcript?.isTurnRunning() ?? false) || (transcript?.recentlyEnded ?? false);
     return {
       running,
       title: running ? 'Copilot · 处理中…' : 'Copilot',

@@ -192,6 +192,19 @@ export class TranscriptWatcher {
     return this.lastEventAt ? Date.now() - this.lastEventAt : Number.MAX_SAFE_INTEGER;
   }
 
+  /**
+   * agent 会话里模型每一步都会写 turn_end，真正的“整轮结束”要再静默一段时间才能确认；
+   * 用这个窗口避免每一步之间把卡片闪成“已完成”。
+   */
+  get recentlyEnded(): boolean {
+    return !!this.turnEndedAt && Date.now() - this.turnEndedAt < 1800;
+  }
+
+  /** turn_end 之后确认整轮结束所需的静默时长 */
+  private get settleDelayMs(): number {
+    return this.layout === 'session-state' ? Math.max(this.softFinalIdleMs, 2500) : this.softFinalIdleMs;
+  }
+
   /** 本任务耗时（毫秒，turn_end 时结算） */
   get elapsedMs(): number {
     if (this.lastElapsedMs) {
@@ -200,8 +213,7 @@ export class TranscriptWatcher {
     return this.turnStartedAt ? Date.now() - this.turnStartedAt : 0;
   }
 
-  /** 回合结束后清空累计，下一轮重新开始 */
-  reset(): void {
+  /** 回合结束后清空累计，下一轮重新开始 */  reset(): void {
     this.thinking = '';
     this.text = '';
     this.tools = [];
@@ -683,7 +695,7 @@ export class TranscriptWatcher {
       if (this.turnOpen) {
         return;
       }
-      if (Date.now() - this.turnEndedAt < this.softFinalIdleMs) {
+      if (Date.now() - this.turnEndedAt < this.settleDelayMs) {
         return;
       }
     } else if (this.toolInFlightCount > 0 || this.quietMs < this.stallIdleMs) {
@@ -748,10 +760,12 @@ export class TranscriptWatcher {
     if (!text) {
       return;
     }
-    if (this.text.trim().endsWith(text)) {
-      return;
+    // summary 就是这一轮的最终答复：直接**替换**过程中的旁白/工具叙述，
+    // 否则卡片会变成「过程解说 + 最终总结」，看起来像混进了非正文内容。
+    if (this.text.trim() !== text) {
+      this.text = capTail(text, 20000);
+      this.dirty = true;
     }
-    this.appendText(text);
   }
 
   private pushTool(name: string): void {

@@ -135,6 +135,26 @@
 				"E:\\repo\\EWW\\.doc.cmd"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "tests 1.1.12",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.t4.cmd"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "release 1.1.12",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.r5.cmd"
+			],
+			"isBackground": false
 		}
 	]
 }
