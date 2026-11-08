@@ -125,6 +125,16 @@
 				"E:\\repo\\EWW\\.r3.cmd"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "docs commit",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.doc.cmd"
+			],
+			"isBackground": false
 		}
 	]
 }

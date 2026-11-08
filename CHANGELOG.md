@@ -2,6 +2,34 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.1.11 — 新回复卡片不再携带上一条回复
+
+> **English summary** — when a new turn started, the stream state still held the previous turn's
+> `lastAnswerText`. Because the card always keeps the *longer* text (`pickLonger`), the new card
+> showed the old answer at first. The transcript now exposes `currentPrompt`; delta / soft-final /
+> injection paths compare it with the card's `promptText` and clear the stale snapshot first.
+
+### 根因
+
+- 一张卡在**同一回合内**要防止正文变短（`pickLonger` 总是留更长的一份）。
+- 但换回合时状态可能还没换：`transcript` 先送来新回合的正文/软结束，而此时 `state.promptText`
+  仍是上一轮（或为空），`pickLonger(newText, state.lastAnswerText)` 就会把**上一轮的答案**留在新卡上。
+- 注入路径同理：上一轮状态若还没 `doneAt`（软结束不设置它），新任务会复用那张卡的正文快照。
+
+### 修复
+
+- `TranscriptWatcher` 新增 `currentPrompt`（每次 `user.message` 更新，`session.start`/`reset` 清空）。
+- `src/cardLifecycle.ts` 新增 `samePromptTurn()` / `resetTurnText()`：
+  - 同一轮（提问文本相同，忽略空白）→ 保持正文；
+  - 新一轮 → 清空 `lastAnswerText` / `softFinalText` / `floor` / `doneAt` / `requestIndex` 等快照后重建。
+- `onDelta`、`onSoftFinal`、注入建卡三处都先做这个判定（日志：`检测到新一轮提问，清空上一轮正文快照`）。
+- 注入时若上一轮还有内容（或已定稿），先用 `retireStreamCard()` 把它收尾成终态，再为新任务建卡。
+
+### 测试
+
+- `test/card-owner.js` 扩充：不同提问必须重置、仅空白差异算同一轮、无提问文本保持旧行为、
+  重置后 `pickLonger` 不会再拿到旧答案。
+
 ## 1.1.10 — 修复“同一个提问出现两张处理中卡片”
 
 > **English summary** — the same prompt is observed twice (transcript stream + `chatSessions` patch
