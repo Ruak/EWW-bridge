@@ -80,6 +80,13 @@ const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   if (after.text.trim() !== before) {
     throw new Error('重复 summary 事件导致正文变化');
   }
+  // 每来一条新的 user.message，回合序号必须递增（卡片用它判断“这一帧是不是上一轮的”）
+  const seqBefore = watcher.turnIndex;
+  append({ type: 'user.message', data: { content: '再跑一次同样的检查' } });
+  await delay(200);
+  if (watcher.turnIndex !== seqBefore + 1) {
+    throw new Error(`回合序号未递增：${seqBefore} -> ${watcher.turnIndex}`);
+  }
   watcher.stop();
   console.log('PASS: agent 最终答复用 task_complete summary 替换过程旁白且不重复');
 })().catch((error) => {

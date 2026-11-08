@@ -155,6 +155,16 @@
 				"E:\\repo\\EWW\\.r5.cmd"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "release 1.1.13",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.r6.cmd"
+			],
+			"isBackground": false
 		}
 	]
 }

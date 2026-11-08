@@ -246,6 +246,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     lastEventAt?: number;
     /** 本轮的用户提问原文：transcript 与 chatSessions 会各看到一次，同文本必须复用同一张卡 */
     promptText?: string;
+    /** 提问序号（transcript.turnIndex）：与当前不同即说明这条状态属于上一轮 */
+    turnSeq?: number;
     /** 诊断：待发送正文长度 / 已发送正文长度 */
     pendingTextLen?: number;
     lastSentTextLen?: number;
@@ -403,6 +405,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       return fallback;
     }
+    // 没有回合下标就不碰 chatSessions：latestAnswerText() 不带下标返回的是“最后一条请求”，
+    // 新回合刚开始时那还是**上一轮**的答案（实测新卡整段带上一条回复）。
+    if (typeof index !== 'number') {
+      return fallback;
+    }
     const sessionText = watcher?.latestAnswerText(index) ?? '';
     return sessionText.length > (fallback || '').length ? sessionText : fallback;
   };
@@ -544,6 +551,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         lastPatchAt: Date.now(),
         lastEventAt: Date.now(),
         turnStartedAt: 0,
+        turnSeq: transcript?.turnIndex,
       };
       activeStreams.set(sessionId, state);
       log(`outbound: stream card for ${sessionId.slice(0, 8)}`);
@@ -844,9 +852,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const aborted = event.aborted === true;
       // 新回合但卡片状态还没换：先清掉上一轮快照，否则软结束会把旧答案定稿到新卡
       const currentPrompt = transcript?.currentPrompt ?? '';
-      if (state && !samePromptTurn(state, currentPrompt)) {
-        log('outbound: 检测到新一轮提问，清空上一轮正文快照（软结束）');
+      const seq = transcript?.turnIndex ?? 0;
+      const seqChanged = !!state && state.turnSeq !== undefined && state.turnSeq !== seq;
+      if (state && (seqChanged || !samePromptTurn(state, currentPrompt))) {
+        log(`outbound: 检测到新一轮提问（#${seq}），清空上一轮正文快照（软结束）`);
         resetTurnText(state, currentPrompt);
+      }
+      if (state) {
+        state.turnSeq = seq;
       }
       const softAnswer0 = mergedAnswer(event.text, state?.requestIndex);
       if (!softAnswer0.trim() && !aborted) {
@@ -1028,9 +1041,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           const existing = activeStreams.get(event.sessionId);
           // 新回合但卡片状态还没换：先清掉上一轮快照，否则 pickLonger 会把旧答案留在新卡上
           const currentPrompt = transcript?.currentPrompt ?? '';
-          if (existing && !samePromptTurn(existing, currentPrompt)) {
-            log('outbound: 检测到新一轮提问，清空上一轮正文快照（增量）');
+          const seq = transcript?.turnIndex ?? 0;
+          const seqChanged = !!existing && existing.turnSeq !== undefined && existing.turnSeq !== seq;
+          if (existing && (seqChanged || !samePromptTurn(existing, currentPrompt))) {
+            log(`outbound: 检测到新一轮提问（#${seq}），清空上一轮正文快照（增量）`);
             resetTurnText(existing, currentPrompt);
+          }
+          if (existing) {
+            existing.turnSeq = seq;
           }
           const answer = pickLonger(mergedAnswer(event.text, existing?.requestIndex), existing?.lastAnswerText ?? '');
           if (regressedAnswer(existing, answer)) {

@@ -2,6 +2,31 @@
 
 All notable changes to **EWW Bridge** are documented here.
 
+## 1.1.13 — 彻底切断"上一轮正文"进入新卡
+
+> **English summary** — two remaining leak paths: ① `mergedAnswer()` fell back to
+> `chatSessions.latestAnswerText()` **without** a request index, which means "the newest request" —
+> i.e. the *previous* turn's answer, used whenever the new card had no index yet. It now requires a
+> numeric index. ② prompt-text comparison failed for repeated identical prompts; the transcript now
+> exposes a monotonic `turnIndex` and each card remembers the turn it belongs to — a different index
+> always resets the snapshot.
+
+### 根因
+
+1. `mergedAnswer(fallback, index)` 在没有 `index` 时会调用 `watcher.latestAnswerText()`，
+   而不带下标就是"最后一条请求的答案"——新回合刚开始时，chatSessions 里最后一条还是**上一轮**。
+   新卡没有 `requestIndex` 时正好走到这里 → 旧答案更长 → 被 `pickLonger` 选中。
+2. 1.1.11 用"提问文本相同 = 同一轮"判定；用户重复同一句话（或两次内容完全相同）时就失效，
+   旧状态没被清空，新卡继续沿用旧正文。
+
+### 修复
+
+- `mergedAnswer()`：**没有数字型 `index` 时绝不使用 chatSessions 正文**，只用 transcript 的实时文本。
+- `TranscriptWatcher` 新增 `turnIndex`（每条新的 `user.message` +1）。
+- `TurnStream.turnSeq` 记录卡片属于哪一轮；`onDelta` / `onSoftFinal` 里
+  `turnSeq !== transcript.turnIndex` 即判定为换轮，先 `resetTurnText()` 清空全部快照再渲染。
+- 日志：`outbound: 检测到新一轮提问（#N），清空上一轮正文快照（增量/软结束）`。
+
 ## 1.1.12 — 终稿只保留最终答复；"已完成"不再提前出现
 
 > **English summary** — ① in agent sessions the final answer lives in `task_complete.summary`; it is

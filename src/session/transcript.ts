@@ -91,6 +91,8 @@ export class TranscriptWatcher {
   private lastLoggedTextLen = 0;
   /** 本轮用户提问原文（新回合开始时更新） */
   private currentPromptText = '';
+  /** 提问序号：每看到一条新的 user.message 就 +1，卡片用它判断“这一帧是不是上一轮的” */
+  private turnSeq = 0;
 
   onDelta?: (event: StreamDelta) => void;
   onSoftFinal?: (event: StreamDelta) => void;
@@ -130,6 +132,11 @@ export class TranscriptWatcher {
   /** 本轮提问原文（用于卡片归属判断；空串表示还没看到提问） */
   get currentPrompt(): string {
     return this.currentPromptText;
+  }
+
+  /** 提问序号（每次 user.message 递增），用于判定卡片状态是否属于当前这一轮 */
+  get turnIndex(): number {
+    return this.turnSeq;
   }
 
   get deltaCount(): number {
@@ -557,6 +564,7 @@ export class TranscriptWatcher {
       // 记下本轮提问原文：卡片侧用它判断“这一帧属于哪一轮”，避免新卡带上上一轮正文
       if (content) {
         this.currentPromptText = content;
+        this.turnSeq += 1;
       }
       // 新回合开始：清空上一轮累计，避免新卡片带上旧内容
       this.thinking = '';
