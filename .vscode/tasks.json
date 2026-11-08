@@ -35,6 +35,36 @@
 				"E:\\repo\\EWW\\.rel.cmd"
 			],
 			"isBackground": false
+		},
+		{
+			"label": "check l10n",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.l10n.cmd"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "check l10n 2",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.l10n2.cmd"
+			],
+			"isBackground": false
+		},
+		{
+			"label": "release 1.1.9",
+			"type": "shell",
+			"command": "cmd",
+			"args": [
+				"/c",
+				"E:\\repo\\EWW\\.rel2.cmd"
+			],
+			"isBackground": false
 		}
 	]
 }

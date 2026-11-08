@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -175,6 +176,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       `注入队列: ${injector.pending}`,
       `推送目标: ${targetChatId() || '未设置'}${boundChatId() ? '（本工作区已绑定）' : ''}`,
       `注入方式: ${readConfig().newChat ? '每次新会话' : '追加当前会话'}`,
+      `界面语言: ${vscode.env.language}${vscode.env.language.startsWith('zh') ? '' : '（命令标题会显示英文）'}`,
       lastStartError ? `最近错误: ${lastStartError}` : '',
     ]
       .filter(Boolean)
@@ -1772,6 +1774,42 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           },
         });
       }
+      if (!vscode.env.language.startsWith('zh')) {
+        items.push({
+          label: `$(globe) 切换界面语言为中文（当前 ${vscode.env.language}）`,
+          description: '写入 argv.json，需要完全退出并重新打开 VS Code',
+          run: async () => {
+            const userData = context.globalStorageUri?.fsPath
+              ? path.resolve(context.globalStorageUri.fsPath, '..', '..', '..')
+              : '';
+            if (!userData) {
+              await vscode.window.showWarningMessage('无法定位 VS Code 用户数据目录。');
+              return;
+            }
+            const file = path.join(userData, 'argv.json');
+            let raw = '';
+            try {
+              raw = fs.readFileSync(file, 'utf8');
+            } catch {
+              raw = '// VS Code 启动参数\n{\n}\n';
+            }
+            if (/"locale"\s*:/.test(raw)) {
+              raw = raw.replace(/"locale"\s*:\s*"[^"]*"/, '"locale": "zh-cn"');
+            } else {
+              raw = raw.replace(/\{\s*/, '{\n\t"locale": "zh-cn",\n');
+            }
+            try {
+              fs.writeFileSync(file, raw, 'utf8');
+            } catch (error) {
+              await vscode.window.showErrorMessage(`写入 ${file} 失败：${String(error)}`);
+              return;
+            }
+            await vscode.window.showInformationMessage(
+              `已把界面语言设为中文（${file}）。\n请完全退出 VS Code 再重新打开（仅重载窗口不够）。`,
+            );
+          },
+        });
+      }
       items.push({ label: '$(output) 打开日志', run: () => initLog().show() });
       const picked = await vscode.window.showQuickPick(items, {
         title: 'EWW Bridge',
@@ -2169,6 +2207,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           (copilotExt?.packageJSON as { version?: string } | undefined)?.version || '?'
         } · 补丁 ${patchState.state}${patchState.file ? ` (${patchState.file})` : ''}`,
       );
+      // 语言诊断：命令标题的中文来自 package.nls.<language>.json，语言对不上就只能显示英文
+      try {
+        const lang = vscode.env.language || 'en';
+        const nlsFile = path.join(context.extensionPath, `package.nls.${lang}.json`);
+        log(
+          `i18n: language=${lang} nls=${fs.existsSync(nlsFile) ? 'ok' : 'missing'}` +
+            `（界面中文但命令英文时，检查 argv.json 的 locale 与语言包版本）`,
+        );
+      } catch (error) {
+        logError('i18n probe failed', error);
+      }
       if (patchState.state !== 'clean') {
         return;
       }
